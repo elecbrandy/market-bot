@@ -1,0 +1,36 @@
+# 환경변수
+.env
+**/.env
+
+# 볼륨 데이터
+volumes/
+db/
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+
+# Docker
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 기타
+*.bak
+*.tmp
+*.log
+*.sh
+*.txt
