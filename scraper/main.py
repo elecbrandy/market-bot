@@ -1,15 +1,17 @@
 import os
 from datetime import datetime
 from dotenv import load_dotenv
+from pathlib import Path
+
+env_path = Path(__file__).resolve().parent.parent / '.env'
+load_dotenv(dotenv_path=env_path)
 
 from src.database import init_db, SessionLocal
-
-# 스크래퍼 모듈들 임포트
 from src.scrapers.eiga import EigaScraper
+from src.scrapers.prtimes import PrtimesScraper
+from src.scrapers.oricon import OriconScraper
+from src.scrapers.natalie import NatalieScraper
 # from src.scrapers.yahoo import YahooScraper  # 추후 추가될 사이트
-# from src.scrapers.natalie import NatalieScraper # 추후 추가될 사이트
-
-load_dotenv()
 
 def main():
     # 1. env load
@@ -25,7 +27,10 @@ def main():
 
     # 3. 사용할 스크래퍼 '클래스' 목록 정의
     scraper_classes = [
-        EigaScraper,
+        NatalieScraper,
+        # OriconScraper,
+        # PrtimesScraper,
+        # EigaScraper,
         # YahooScraper,
         # NatalieScraper,
     ]

@@ -65,3 +65,10 @@ test-scraper:
 	@echo "DB가 준비될 때까지 3초 대기합니다..."
 	@sleep 3
 	docker compose --profile tools run --rm scraper
+
+# DB만 띄운 상태에서 스크래퍼 로컬 실행
+test-scraper-local:
+	docker compose up -d db
+	@echo "DB가 준비될 때까지 3초 대기..."
+	@sleep 3
+	cd scraper && DB_CONTAINER=127.0.0.1 python3.11 main.py

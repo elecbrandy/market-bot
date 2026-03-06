@@ -11,10 +11,10 @@
 - **애니메이트 타임즈** [`animatetimes.com`](https://animatetimes.com)
   팬덤 반응, 성우 인터뷰, 굿즈 출시 정보
 
-- **PR TIMES (엔터)** [`prtimes.jp/.../entertainment`](https://prtimes.jp/main/html/searchrlp/ct/entertainment)
+- [x] **PR TIMES (엔터)** [`prtimes.jp/.../entertainment`](https://prtimes.jp/main/html/searchrlp/ct/entertainment)
   기업 배포 공식 보도자료 (오피셜 팩트 체크용)
 
-- **에이가 (뉴스)** [`eiga.com/news/anime/`](https://eiga.com/news/anime/)
+- [x] **에이가 (뉴스)** [`eiga.com/news/anime/`](https://eiga.com/news/anime/)
   애니메이션 영화 특화 소식 및 심층 기사
 
 - **에이가 (랭킹)** [`eiga.com/ranking/`](https://eiga.com/ranking/)
