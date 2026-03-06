@@ -22,7 +22,7 @@ services:
       dockerfile: Dockerfile
     container_name: ${SCRAPER_CONTAINER}
     env_file:
-      - ./scraper/.env
+      - .env
     volumes:
       - ./db:/app/db
       - ./scraper:/app
@@ -41,7 +41,7 @@ services:
     ports:
       - "${BACKEND_PORT}:8000"
     env_file:
-      - ./backend/.env
+      - .env
     volumes:
       - ./db:/app/db
       - ./backend:/app

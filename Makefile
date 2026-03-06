@@ -54,3 +54,14 @@ fclean:
 	docker compose down -v --remove-orphans
 	docker image prune -af
 	docker builder prune -af
+
+# DB만 백그라운드로 단독 실행
+up-db:
+	docker compose up -d db
+
+# DB 실행 후 스크래퍼 원큐에 테스트하기
+test-scraper:
+	docker compose up -d db
+	@echo "DB가 준비될 때까지 3초 대기합니다..."
+	@sleep 3
+	docker compose --profile tools run --rm scraper
