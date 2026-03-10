@@ -33,4 +33,4 @@ Thumbs.db
 *.tmp
 *.log
 *.sh
-*.txt
+requirements.txt
