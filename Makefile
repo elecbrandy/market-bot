@@ -54,6 +54,7 @@ fclean:
 	docker compose down -v --remove-orphans
 	docker image prune -af
 	docker builder prune -af
+	rm -rf ./volumes/*
 
 # DB만 백그라운드로 단독 실행
 up-db:

@@ -1,16 +1,21 @@
 from abc import ABC, abstractmethod
-from sqlalchemy.orm import Session
+from typing import AsyncGenerator, Dict, Any
 from datetime import date
+from crawl4ai import AsyncWebCrawler
+from src.utils.logger import get_logger
 
 class BaseScraper(ABC):
-    def __init__(self, db: Session, keyword: str, start_date: date, end_date: date):
-        self.db = db
+    def __init__(self, crawler: AsyncWebCrawler, keyword: str, start_date: date, end_date: date, seen_urls: set[str], max_items: int = 0):
+        self.crawler = crawler
         self.keyword = keyword
         self.start_date = start_date
         self.end_date = end_date
-        self.source_name = "unknown" # 각 클래스에서 자신의 소스 이름을 정의
+        self.seen_urls = seen_urls
+        self.max_items = max_items
+        self.source_name = "unknown"
+        self.logger = get_logger(self.source_name)
 
     @abstractmethod
-    def scrape(self):
-        """이 메서드 안에 각 사이트별 크롤링 로직을 할 것."""
-        pass
+    async def scrape(self) -> AsyncGenerator[Dict[str, Any], None]:
+        """비동기 크롤링 로직: 수집된 기사 데이터를 dictionary 형태로 yield."""
+        yield {}

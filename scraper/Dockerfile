@@ -7,7 +7,7 @@ ENV TZ=Asia/Seoul
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN playwright install chromium && playwright install-deps chromium  # 추가
+RUN crawl4ai-setup
 
 COPY . .
 

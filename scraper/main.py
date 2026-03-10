@@ -1,4 +1,5 @@
 import os
+import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 from pathlib import Path
@@ -7,52 +8,81 @@ env_path = Path(__file__).resolve().parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
 from src.database import init_db, SessionLocal
+from src.models import News
+from crawl4ai import AsyncWebCrawler, BrowserConfig
+from sqlalchemy.dialects.postgresql import insert
+from src.utils.logger import get_logger, log_progress
 from src.scrapers.eiga import EigaScraper
-from src.scrapers.prtimes import PrtimesScraper
-from src.scrapers.oricon import OriconScraper
-from src.scrapers.natalie import NatalieScraper
-# from src.scrapers.yahoo import YahooScraper  # 추후 추가될 사이트
+# from src.scrapers.prtimes import PrtimesScraper
 
-def main():
-    # 1. env load
+
+async def main():
+    # Load Keywords 
     raw_keywords = os.getenv("SEARCH_KEYWORDS", "怪獣8号")
     keywords = [k.strip() for k in raw_keywords.split(",") if k.strip()]
 
+    # Set Date Range
     start_date = datetime.strptime(os.getenv("START_DATE", "20200101"), "%Y%m%d").date()
     end_date = datetime.strptime(os.getenv("END_DATE", "20991231"), "%Y%m%d").date()
 
-    # 2. DB 세션 생성
+    # Set max items per keyword (optional)
+    max_items = int(os.getenv("MAX_ITEMS_PER_KEYWORD", "0"))  # 0 means no limit
+
     init_db()
     db = SessionLocal()
+    logger = get_logger("main")
 
-    # 3. 사용할 스크래퍼 '클래스' 목록 정의
     scraper_classes = [
-        NatalieScraper,
-        # OriconScraper,
+        EigaScraper,
         # PrtimesScraper,
-        # EigaScraper,
-        # YahooScraper,
-        # NatalieScraper,
     ]
 
-    print(f"🚀 스크래핑 시작: 총 {len(keywords)}개 키워드, {len(scraper_classes)}개 사이트 대상")
-    print(f"📅 수집 기간: {start_date} ~ {end_date}")
+    logger.info(f"Scraping started: {len(keywords)} keywords, {len(scraper_classes)} sources")
+    browser_config = BrowserConfig(headless=True, verbose=False)
 
-    # 4. M x N 중첩 루프 실행 (키워드 1개당 -> 모든 사이트 순회)
     try:
-        for keyword in keywords:
-            print(f"\n{'='*50}\n🎯 [Target Keyword]: {keyword}\n{'='*50}")
-            
-            for ScraperClass in scraper_classes:
-                # 각 타겟 사이트별로 새로운 스크래퍼 인스턴스 생성 후 실행
-                scraper = ScraperClass(db, keyword, start_date, end_date)
-                scraper.scrape()
-                
+        async with AsyncWebCrawler(config=browser_config) as crawler:
+            logger.info("Loading existing URLs from database...")
+            seen_records = db.query(News.url).all()
+            global_seen_urls = {record[0] for record in seen_records}
+
+            total_tasks = len(keywords) * len(scraper_classes)
+            task_count = 0
+            for keyword in keywords:
+                logger.info(f"Processing keyword: {keyword}")
+                for ScraperClass in scraper_classes:
+                    # If the URL has already been seen (from any keyword), the scraper will skip it.
+                    scraper = ScraperClass(crawler, keyword, start_date, end_date, global_seen_urls, max_items)
+                    
+                    added_count = 0
+                    async for news_data in scraper.scrape():
+                        stmt = insert(News).values(
+                            source=news_data["source"],
+                            keyword=news_data["keyword"],
+                            url=news_data["url"],
+                            title=news_data["title"],
+                            content=news_data["content"],
+                            published_date=news_data["published_date"]
+                        )
+                        
+                        # Ignore conflicts based on the 'url' column
+                        stmt = stmt.on_conflict_do_nothing(index_elements=['url'])
+                        
+                        db.execute(stmt)
+                        added_count += 1
+                        
+                        db.commit() 
+                        logger.info(f"Saved: {news_data['title'][:30]}...")
+                    logger.info(f"Finished {scraper.source_name} for '{keyword}'. Added: {added_count} items.")
+                    task_count += 1
+                    log_progress(logger, task_count, total_tasks, prefix="Overall Progress:")
+
     except Exception as e:
-        print(f"\n❌ 스크래핑 도중 에러가 발생했습니다: {e}")
+        logger.error(f"An error occurred while scraping: {e}")
+        db.rollback()
     finally:
         db.close()
-        print("\n✅ 모든 스크래핑 작업이 완료되었습니다.")
+        logger.info("Scraping completed.")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
