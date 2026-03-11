@@ -1,0 +1,731 @@
+```
+./scraper/Dockerfile
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1
+ENV TZ=Asia/Seoul 
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+RUN crawl4ai-setup
+
+COPY . .
+
+CMD ["python", "main.py"]
+```
+
+```
+./scraper/main.py
+
+import asyncio
+from dotenv import load_dotenv
+from pathlib import Path
+
+load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / '.env')
+
+from crawl4ai import AsyncWebCrawler, BrowserConfig
+from rich.rule import Rule
+from rich.table import Table
+
+from src.utils.config import load_config
+from src.database import init_db, SessionLocal
+from src.runner import run_all
+from src.utils.logger import get_console
+from src.scrapers.eiga import EigaScraper
+
+console = get_console()
+
+# Scraper 클래스 목록
+SCRAPER_CLASSES = [
+    EigaScraper,
+]
+
+
+async def main():
+    config = load_config()
+
+    # Summary 출력
+    console.print(Rule("[bold green] Scraper Starting [/bold green]"))
+    summary = Table(show_header=False, box=None, padding=(0, 2))
+    summary.add_column(style="bold cyan")
+    summary.add_column(style="white")
+    summary.add_row("Keywords",   ", ".join(config.keywords))
+    summary.add_row("Sources",    ", ".join(cls.__name__ for cls in SCRAPER_CLASSES))
+    summary.add_row("Date Range", f"{config.start_date}  →  {config.end_date}")
+    summary.add_row("Max Items",  str(config.max_items) if config.max_items else "unlimited")
+    console.print(summary)
+    console.print()
+
+    # DB 연결
+    init_db()
+    db = SessionLocal()
+
+    # Scraping 실행
+    try:
+        async with AsyncWebCrawler(config=BrowserConfig(headless=True, verbose=False)) as crawler:
+            await run_all(crawler, db, SCRAPER_CLASSES, config)
+    except Exception as e:
+        from src.utils.logger import get_logger
+        get_logger("main").error(f"Scraping failed: {e}", exc_info=True)
+        db.rollback()
+    finally:
+        db.close()
+
+    console.print(Rule("[bold green] Scraping Completed [/bold green]"))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+```
+./scraper/src/runner.py
+
+from sqlalchemy.orm import Session
+from sqlalchemy.dialects.postgresql import insert
+from crawl4ai import AsyncWebCrawler
+
+from src.models import News
+from src.utils.config import ScraperConfig
+from src.utils.logger import get_logger, get_console
+
+logger  = get_logger("runner")
+console = get_console()
+
+async def load_seen_urls(db: Session) -> set[str]:
+    """
+    DB에 이미 저장된 뉴스 URL을 모두 불러와서 집합으로 반환합니다.
+    """
+    return {row[0] for row in db.query(News.url).all()}
+
+async def run_scraper(
+    crawler:       AsyncWebCrawler,
+    db:            Session,
+    ScraperClass,
+    keyword:       str,
+    config:        ScraperConfig,
+    seen_urls:     set[str],
+) -> int:
+    """
+    단일 스크래퍼에 대해 주어진 키워드로 크롤링을 실행하고, 결과를 DB에 저장합니다.
+    """
+
+    # Scraper 인스턴스 생성
+    scraper = ScraperClass(crawler, keyword, config.start_date, config.end_date, seen_urls, config.max_items)
+    added_count = 0
+
+    # Scraper 실행 및 DB 저장
+    async for news_data in scraper.scrape():
+        stmt = insert(News).values(
+            source         = news_data["source"],
+            keyword        = news_data["keyword"],
+            url            = news_data["url"],
+            title          = news_data["title"],
+            content        = news_data["content"],
+            published_date = news_data["published_date"],
+        )
+        stmt = stmt.on_conflict_do_nothing(index_elements=["url"])
+        db.execute(stmt)
+        db.commit()
+        added_count += 1
+        logger.info(f"[green]Saved[/green] [{news_data['published_date']}] {news_data['title'][:45]}")
+
+    logger.info(
+        f"[bold]{ScraperClass.__name__}[/bold] / [cyan]{keyword}[/cyan] "
+        f"— [bold green]{added_count}[/bold green] items saved."
+    )
+    console.print()
+
+    return added_count
+
+
+async def run_all(
+    crawler:         AsyncWebCrawler,
+    db:              Session,
+    scraper_classes: list,
+    config:          ScraperConfig,
+) -> None:
+    """
+    모든 스크래퍼에 대해 키워드 조합을 순차적으로 실행합니다.
+    """
+    seen_urls = await load_seen_urls(db)
+    logger.info(f"[bold]{len(seen_urls)}[/bold] URLs already in DB — will skip duplicates.")
+
+    # 각 키워드와 스크래퍼 조합에 대해 순차적으로 실행
+    tasks = []
+    for keyword in config.keywords:
+        for ScraperClass in scraper_classes:
+            tasks.append(
+                run_scraper(crawler, db, ScraperClass, keyword, config, seen_urls)
+            )
+```
+
+```
+./scraper/src/models.py
+
+from sqlalchemy import Column, Integer, String, Date, DateTime, Text, Boolean
+from sqlalchemy.ext.declarative import declarative_base
+from datetime import datetime
+
+Base = declarative_base()
+
+class News(Base):
+    __tablename__ = 'news'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String, index=True)
+    keyword = Column(String, index=True)
+    title = Column(String)
+    content = Column(Text)
+    url = Column(String, unique=True, index=True)
+    is_parsed = Column(Boolean, default=True, index=True)
+    published_date = Column(Date, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+```
+
+```
+./scraper/src/database.py
+
+import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from src.models import Base
+
+DB_USER = os.getenv("POSTGRES_USER", "postgres")
+DB_PASSWORD = os.getenv("POSTGRES_PASSWORD", "postgres")
+DB_NAME = os.getenv("POSTGRES_DB", "market_db")
+DB_HOST = os.getenv("DB_CONTAINER", "db")
+DB_PORT = os.getenv("POSTGRES_PORT", "5432")
+
+DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+def init_db():
+    Base.metadata.create_all(bind=engine)
+
+```
+
+```
+./scraper/src/utils/config.py
+
+import os
+from dataclasses import dataclass
+from datetime import date, datetime
+
+
+@dataclass
+class ScraperConfig:
+    keywords:   list[str]
+    start_date: date
+    end_date:   date
+    max_items:  int
+
+
+def load_config() -> ScraperConfig:
+    keywords = [
+        k.strip()
+        for k in os.getenv("SEARCH_KEYWORDS", "怪獣8号").split(",")
+        if k.strip()
+    ]
+    return ScraperConfig(
+        keywords   = keywords,
+        start_date = datetime.strptime(os.getenv("START_DATE", "20200101"), "%Y%m%d").date(),
+        end_date   = datetime.strptime(os.getenv("END_DATE",   "20991231"), "%Y%m%d").date(),
+        max_items  = int(os.getenv("MAX_ITEMS_PER_KEYWORD", "0")),
+    )
+```
+
+```
+./scraper/src/utils/__init__.py
+
+
+```
+
+```
+./scraper/src/utils/logger.py
+
+import logging
+import logging.handlers
+from pathlib import Path
+
+from rich.console import Console
+from rich.logging import RichHandler
+
+# ── 파일 로그 경로 ────────────────────────────────────────────────
+_LOG_DIR   = Path(__file__).resolve().parents[2] / "logs"
+_PLAIN_FMT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+_DATE_FMT  = "%Y-%m-%d %H:%M:%S"
+
+_console = Console(stderr=False)
+
+
+def _build_file_handler(name: str) -> logging.handlers.RotatingFileHandler:
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    h = logging.handlers.RotatingFileHandler(
+        _LOG_DIR / f"{name}.log",
+        maxBytes=5 * 1024 * 1024,  # 5 MB
+        backupCount=3,
+        encoding="utf-8",
+    )
+    h.setLevel(logging.DEBUG)
+    h.setFormatter(logging.Formatter(fmt=_PLAIN_FMT, datefmt=_DATE_FMT))
+    return h
+
+
+def get_logger(name: str = "system") -> logging.Logger:
+    """
+    - 콘솔: RichHandler (색상 + traceback 자동)
+    - 파일:  RotatingFileHandler (순수 텍스트, DEBUG 이상)
+    """
+    logger = logging.getLogger(name)
+
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+
+        rich_handler = RichHandler(
+            console=_console,
+            level=logging.INFO,
+            show_path=False,
+            show_time=False,
+            show_level=False,
+            rich_tracebacks=True,
+            tracebacks_show_locals=True,
+            markup=True,
+            log_time_format=_DATE_FMT,
+        )
+        logger.addHandler(rich_handler)
+        logger.addHandler(_build_file_handler(name))
+
+        # 노이즈 억제
+        for noisy in ("httpx", "httpcore", "asyncio"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    return logger
+
+
+def get_console() -> Console:
+    """rich 출력이 필요한 곳에서 공유 Console 사용."""
+    return _console
+
+```
+
+```
+./scraper/src/scrapers/eiga.py
+
+import re
+import asyncio
+from bs4 import BeautifulSoup
+from datetime import datetime
+
+from crawl4ai import CrawlerRunConfig, CacheMode
+
+from src.scrapers.base import BaseScraper
+from src.utils.selectors import SITE_CONFIG
+from src.utils.logger import get_logger
+
+
+class EigaScraper(BaseScraper):
+    """
+    Eiga.com에서 영화 관련 뉴스를 크롤링하는 스크래퍼입니다.
+     - 검색 URL: https://eiga.com/search/?q={keyword}&p={page}
+     - 기사 URL에서 날짜 추출: /news/20240101/ → 2024-01-01
+     - 기사 본문은 CSS 선택자 ".article-body"로 추출
+    """
+    source_name = "eiga"
+
+    config = {
+        "base_url": "https://eiga.com",
+        "search_path": "/search/{keyword}/news/{page}/",
+        "selectors": {
+            "news_container": "#rslt-news",
+            "article_link": "div p.link > a",
+            "article_body": "div.news-detail, div.txt-block",
+        },
+        "regex": {
+            "date_extract": r"/news/(\d{8})/"
+        }
+    }
+    def __init__(self, crawler, keyword, start_date, end_date, seen_urls, max_items=0):
+        super().__init__(crawler, keyword, start_date, end_date, seen_urls, max_items)
+        self.source_name = "eiga"
+        self.config      = SITE_CONFIG[self.source_name]
+        self.logger      = get_logger(self.source_name)
+
+    def _parse_date(self, url: str):
+        """
+        기사 URL에서 날짜를 추출하는 메소드입니다.
+        """
+        match = re.search(self.config["regex"]["date_extract"], url)
+        if match:
+            return datetime.strptime(match.group(1), "%Y%m%d").date()
+        return None
+    
+    async def _fetch_article(self, url: str, pub_date: date, title: str, config: CrawlerRunConfig, sem: asyncio.Semaphore):
+        """
+        개별 기사 페이지를 크롤링하여 기사 데이터를 반환하는 메소드입니다.
+        """
+        async with sem:
+            result = await self.crawler.arun(url=url, config=config)
+            if result.success:
+                return {
+                    "source": self.source_name,
+                    "keyword": self.keyword,
+                    "url": url,
+                    "title": title,
+                    "content": result.markdown.strip() if result.markdown else "",
+                    "published_date": pub_date,
+                }
+            return None
+
+    async def scrape(self):
+        """
+        Eiga.com에서 검색 결과 페이지를 순회하며 기사를 크롤링하는 제너레이터입니다.
+        """
+        page_num      = 1 # 페이지 번호 초기화
+        yielded_count = 0 # 수집된 기사 수 카운터
+
+        article_run_config = CrawlerRunConfig(
+            cache_mode=CacheMode.BYPASS,
+            css_selector=self.config["selectors"].get("article_body"),
+        )
+
+        while True:
+            if self.max_items > 0 and yielded_count >= self.max_items:
+                self.logger.info(f"Reached max limit ({self.max_items}). Stopping.")
+                break
+
+            search_path = self.config["search_path"].format(keyword=self.keyword, page=page_num)
+            target_url  = f"{self.config['base_url']}{search_path}"
+
+            list_run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+            result = await self.crawler.arun(url=target_url, config=list_run_config)
+
+            if not result.success:
+                self.logger.warning(f"Failed to load page {page_num}. Stopping.")
+                break
+
+            soup         = BeautifulSoup(result.html, "html.parser")
+            news_section = soup.select_one(self.config["selectors"]["news_container"])
+            links        = news_section.select(self.config["selectors"]["article_link"]) if news_section else []
+
+            if not links:
+                self.logger.info(f"No more articles on page {page_num}.")
+                break
+
+            reached_old_date = False
+
+            for link in links:
+                if self.max_items > 0 and yielded_count >= self.max_items:
+                    break
+
+                href = link.get("href")
+                if not href:
+                    continue
+
+                full_url = f"https://eiga.com{href}" if href.startswith("/") else href
+                pub_date = self._parse_date(full_url)
+
+                if pub_date:
+                    if pub_date < self.start_date:
+                        self.logger.info(f"Reached articles older than {self.start_date}. Stopping.")
+                        reached_old_date = True
+                        break
+                    if pub_date > self.end_date:
+                        continue
+
+                if full_url in self.seen_urls:
+                    continue
+
+                article_result = await self.crawler.arun(url=full_url, config=article_run_config)
+
+                if article_result.success:
+                    yield {
+                        "source":         self.source_name,
+                        "keyword":        self.keyword,
+                        "url":            full_url,
+                        "title":          link.text.strip(),
+                        "content":        article_result.markdown.strip() if article_result.markdown else "",
+                        "published_date": pub_date,
+                    }
+                    self.seen_urls.add(full_url)
+                    yielded_count += 1
+
+                await asyncio.sleep(1)
+
+            if reached_old_date:
+                break
+
+            page_num += 1
+            await asyncio.sleep(1.5)
+
+```
+
+```
+./scraper/src/scrapers/__init__.py
+
+
+```
+
+```
+./scraper/src/scrapers/base.py
+
+from abc import ABC, abstractmethod
+from typing import AsyncGenerator, Dict, Any
+from datetime import date
+from crawl4ai import AsyncWebCrawler
+from src.utils.logger import get_logger
+import os
+
+os.environ["CRAWL4AI_VERBOSE"] = "false" 
+
+class BaseScraper(ABC):
+    """
+    모든 스크래퍼가 상속해야 하는 기본 클래스입니다.
+    """
+    registry: list[Type["BaseScraper"]] = []
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # BaseScraper를 제외한 모든 서브클래스를 registry에 등록
+        if cls.__name__ != "BaseScraper":
+            BaseScraper.registry.append(cls)
+
+    def __init__(self, crawler: AsyncWebCrawler, keyword: str, start_date: date, end_date: date, seen_urls: set[str], max_items: int = 0):
+        self.crawler = crawler
+        self.keyword = keyword
+        self.start_date = start_date
+        self.end_date = end_date
+        self.seen_urls = seen_urls
+        self.max_items = max_items
+        self.source_name = "unknown"
+        self.logger = get_logger(self.source_name)
+
+    @abstractmethod
+    async def scrape(self) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        비동기 크롤링 로직: 수집된 기사 데이터를 dictionary 형태로 yield 해야 합니다.
+        """
+        yield {}
+```
+
+```
+./frontend/Dockerfile
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 3000
+
+CMD ["python", "app.py"]
+```
+
+```
+./frontend/app.py
+
+import gradio as gr
+
+def predict(input_text: str) -> str:
+    return f"응답: {input_text}"
+
+demo = gr.Interface(fn=predict, inputs="text", outputs="text")
+
+if __name__ == "__main__":
+    demo.launch(server_name="0.0.0.0", server_port=3000)
+```
+
+```
+./Makefile
+
+.PHONY: up down build rebuild restart logs logs-backend logs-frontend logs-db logs-vectordb ps scrape clean fclean
+
+# 전체 서비스 시작 (scraper 제외)
+up:
+	docker compose up -d
+
+# 전체 서비스 중지
+down:
+	docker compose down
+
+# 전체 빌드
+build:
+	docker compose build
+
+# 빌드 후 시작
+rebuild:
+	docker compose down && docker compose build && docker compose up -d
+
+# 재시작
+restart:
+	docker compose restart
+
+# 로그 확인 (전체)
+logs:
+	docker compose logs -f
+
+# 개별 로그
+logs-backend:
+	docker compose logs -f backend
+
+logs-frontend:
+	docker compose logs -f frontend
+
+logs-db:
+	docker compose logs -f db
+
+logs-vectordb:
+	docker compose logs -f vector_db
+
+# 컨테이너 상태 확인
+ps:
+	docker compose ps
+
+# 스크래퍼 실행 (profiles: tools)
+scrape:
+	docker compose --profile tools run --rm scraper
+
+# 컨테이너만 삭제
+clean:
+	docker compose down --remove-orphans
+
+# 컨테이너 + 볼륨 + 이미지 + 빌드캐시 전부 삭제 (주의!)
+fclean:
+	docker compose down -v --remove-orphans
+	docker image prune -af
+	docker builder prune -af
+	rm -rf ./volumes/*
+
+# DB만 백그라운드로 단독 실행
+up-db:
+	docker compose up -d db
+
+# DB 실행 후 스크래퍼 원큐에 테스트하기
+test-scraper:
+	docker compose up -d db
+	@echo "DB가 준비될 때까지 3초 대기합니다..."
+	@sleep 3
+	docker compose --profile tools run --rm scraper
+
+# DB만 띄운 상태에서 스크래퍼 로컬 실행
+test-scraper-local:
+	docker compose up -d db
+	@echo "DB가 준비될 때까지 3초 대기..."
+	@sleep 3
+	cd scraper && DB_CONTAINER=127.0.0.1 venv/bin/python3.11 main.py
+
+```
+
+```
+./backend/Dockerfile
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 8000
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+```
+
+```
+./docker-compose.yml
+
+services:
+  # Database: PostgreSQL
+  db:
+    image: postgres:15-alpine
+    container_name: ${DB_CONTAINER}
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - ./volumes/postgres:/var/lib/postgresql/data
+    networks:
+      - market_net
+
+  # Scraper
+  scraper:
+    build:
+      context: ./scraper
+      dockerfile: Dockerfile
+    container_name: ${SCRAPER_CONTAINER}
+    env_file:
+      - .env
+    volumes:
+      - ./db:/app/db
+      - ./scraper:/app
+      - ./logs:/app/logs
+    networks:
+      - market_net
+    depends_on:
+      - db
+    profiles:
+      - tools
+
+  # Backend
+  backend:
+    build:
+      context: ./backend
+    container_name: ${BACKEND_CONTAINER}
+    ports:
+      - "${BACKEND_PORT}:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./db:/app/db
+      - ./backend:/app
+    depends_on:
+      - vector_db
+      - db
+    networks:
+      - market_net
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+    container_name: ${FRONTEND_CONTAINER}
+    ports:
+      - "${FRONTEND_PORT}:3000"
+    volumes:
+      - ./frontend:/app
+    networks:
+      - market_net
+
+  # Vector Database: ChromaDB
+  vector_db:
+    image: chromadb/chroma:latest
+    container_name: ${VECTOR_DB_CONTAINER}
+    ports:
+      - "${VECTOR_DB_PORT}:8000"
+    volumes:
+      - ./volumes/_chroma:/chroma/chroma
+    networks:
+      - market_net
+
+networks:
+  market_net:
+    driver: bridge
+```
+

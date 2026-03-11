@@ -26,6 +26,7 @@ services:
     volumes:
       - ./db:/app/db
       - ./scraper:/app
+      - ./logs:/app/logs
     networks:
       - market_net
     depends_on:

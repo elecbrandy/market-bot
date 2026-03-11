@@ -72,4 +72,4 @@ test-scraper-local:
 	docker compose up -d db
 	@echo "DB가 준비될 때까지 3초 대기..."
 	@sleep 3
-	cd scraper && DB_CONTAINER=127.0.0.1 python3.11 main.py
+	cd scraper && DB_CONTAINER=127.0.0.1 venv/bin/python3.11 main.py
