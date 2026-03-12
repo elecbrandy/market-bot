@@ -13,7 +13,7 @@ class News(Base):
     title = Column(String)
     content = Column(Text)
     url = Column(String, unique=True, index=True)
-    is_parsed = Column(Boolean, default=True, index=True)
+    is_embedded = Column(Boolean, default=False, index=True)
     published_date = Column(Date, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

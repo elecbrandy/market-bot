@@ -26,8 +26,8 @@ class EigaScraper(BaseScraper):
         "search_path": "/search/{keyword}/news/{page}/",
         "selectors": {
             "news_container": "#rslt-news",
-            "article_link": "div p.link > a",
-            "article_body": "div.richtext", # <--- 이 부분
+            "article_link": "div > h2 > a",
+            "article_body": "div.richtext",
         },
         "regex": {
             "date_extract": r"/news/(\d{8})/"
@@ -93,6 +93,13 @@ class EigaScraper(BaseScraper):
             markdown_generator=md_generator
         )
 
+        # 💡 [무한루프 방지] 이전 페이지 URL 집합
+        previous_page_urls = set()
+        
+        # 💡 [Early Stop] 연속 중복 카운터 및 제한 횟수 설정
+        consecutive_seen_count = 0
+        MAX_CONSECUTIVE_SEEN = 5  # 이미 수집한 기사가 연속 5번 나오면 스크랩 중단
+
         while True:
             if self.max_items > 0 and yielded_count >= self.max_items:
                 break
@@ -113,15 +120,18 @@ class EigaScraper(BaseScraper):
             if not links:
                 break
 
-            # 1. 크롤링할 대상 Task를 먼저 수집
             tasks = []
             reached_old_date = False
+            reached_seen_limit = False  # Early Stop 달성 여부 플래그
+            current_page_urls = set()   # 현재 페이지 URL 수집용
 
             for link in links:
                 href = link.get("href")
                 if not href: continue
 
                 full_url = f"https://eiga.com{href}" if href.startswith("/") else href
+                current_page_urls.add(full_url)
+                
                 pub_date = self._parse_date(full_url)
 
                 if pub_date:
@@ -131,12 +141,29 @@ class EigaScraper(BaseScraper):
                     if pub_date > self.end_date:
                         continue
 
+                # 💡 Early Stop 적용: 이미 본 기사인지 체크
                 if full_url in self.seen_urls:
+                    consecutive_seen_count += 1
+                    if consecutive_seen_count >= MAX_CONSECUTIVE_SEEN:
+                        self.logger.info(f"이미 수집한 기사가 연속 {MAX_CONSECUTIVE_SEEN}번 발견되어 조기 종료(Early Stop)합니다.")
+                        reached_seen_limit = True
+                        break
                     continue
+                else:
+                    # 새로운 기사를 발견하면 연속 카운터 초기화
+                    consecutive_seen_count = 0
                 
                 # _fetch_article 메서드를 활용하여 Task 리스트에 추가
-                title = link.text.strip()
+                title = link.get_text(strip=True)
                 tasks.append(self._fetch_article(full_url, pub_date, title, article_run_config, sem))
+
+            # 💡 무한 루프 방지 적용: 이전 페이지와 목록이 완전히 같다면 마지막 페이지로 간주
+            if current_page_urls and current_page_urls == previous_page_urls:
+                self.logger.info("마지막 페이지에 도달했습니다 (이전 페이지와 동일). 수집을 종료합니다.")
+                break
+            
+            # 다음 루프 비교를 위해 현재 페이지 URL 상태 업데이트
+            previous_page_urls = current_page_urls
 
             # 2. 수집된 Task들을 비동기로 한꺼번에 실행
             if tasks:
@@ -147,7 +174,8 @@ class EigaScraper(BaseScraper):
                         yielded_count += 1
                         yield article_data
 
-            if reached_old_date:
+            # 날짜 제한이거나 Early Stop 조건에 걸렸으면 루프 완전 탈출
+            if reached_old_date or reached_seen_limit:
                 break
 
             page_num += 1

@@ -43,15 +43,24 @@ class NatalieScraper(BaseScraper):
         self.logger      = get_logger(self.source_name)
 
     def _parse_date(self, date_text: str) -> date:
+        """
+        Natalie 기사 날짜 파싱. 연도가 없는 경우 올해 연도를 부여하되,
+        그 결과가 오늘 날짜보다 미래라면 작년 기사로 처리합니다.
+        """
         date_str = date_text.split(" ")[0].strip()
         
         try:
             if "年" in date_str:
                 return datetime.strptime(date_str, "%Y年%m月%d日").date()
             else:
-                current_year = datetime.now().year
+                current_date = datetime.now().date()
                 parsed_date = datetime.strptime(date_str, "%m月%d日").date()
-                return parsed_date.replace(year=current_year)
+                candidate_date = parsed_date.replace(year=current_date.year)
+                
+                # 💡 버그 수정: 부여된 날짜가 오늘보다 미래면 작년으로 처리
+                if candidate_date > current_date:
+                    return candidate_date.replace(year=current_date.year - 1)
+                return candidate_date
         except ValueError as e:
             self.logger.warning(f"Failed to parse date '{date_text}': {e}")
             return None
@@ -109,6 +118,13 @@ class NatalieScraper(BaseScraper):
             excluded_selector=self.config["exclude"]
         )
 
+        # 💡 [무한루프 방지] 이전 페이지 URL 집합
+        previous_page_urls = set()
+        
+        # 💡 [Early Stop] 연속 중복 카운터
+        consecutive_seen_count = 0
+        MAX_CONSECUTIVE_SEEN = 5
+
         while True:
             if self.max_items > 0 and yielded_count >= self.max_items:
                 break
@@ -137,6 +153,8 @@ class NatalieScraper(BaseScraper):
 
             tasks = []
             reached_old_date = False
+            reached_seen_limit = False
+            current_page_urls = set()
 
             for article in articles:
                 href = article.get("href")
@@ -147,6 +165,7 @@ class NatalieScraper(BaseScraper):
                     continue
 
                 full_url = urllib.parse.urljoin(self.config["base_url"], href)
+                current_page_urls.add(full_url)
 
                 date_tag = article.select_one(self.config["selectors"]["article_date"])
                 date_text = date_tag.get_text(strip=True) if date_tag else ""
@@ -161,8 +180,16 @@ class NatalieScraper(BaseScraper):
                 if pub_date > self.end_date:
                     continue
 
+                # 💡 Early Stop 적용
                 if full_url in self.seen_urls:
+                    consecutive_seen_count += 1
+                    if consecutive_seen_count >= MAX_CONSECUTIVE_SEEN:
+                        self.logger.info(f"이미 수집한 기사가 연속 {MAX_CONSECUTIVE_SEEN}번 발견되어 조기 종료(Early Stop)합니다.")
+                        reached_seen_limit = True
+                        break
                     continue
+                else:
+                    consecutive_seen_count = 0
 
                 title_tag = article.select_one(self.config["selectors"]["article_title"])
                 title = title_tag.get_text(separator=" ", strip=True) if title_tag else "No Title"
@@ -173,6 +200,13 @@ class NatalieScraper(BaseScraper):
 
                 tasks.append(self._fetch_article(full_url, pub_date, title, article_run_config, sem))
 
+            # 💡 무한 루프 방지: 이전 페이지와 완전 동일한 기사 목록이라면 탐색 종료
+            if current_page_urls and current_page_urls == previous_page_urls:
+                self.logger.info("마지막 페이지에 도달했습니다 (이전 페이지와 동일). 수집을 종료합니다.")
+                break
+            
+            previous_page_urls = current_page_urls
+
             if tasks:
                 results = await asyncio.gather(*tasks)
                 for article_data in results:
@@ -181,8 +215,9 @@ class NatalieScraper(BaseScraper):
                         yielded_count += 1
                         yield article_data
 
-            if reached_old_date:
-                self.logger.info("Reached articles older than start_date. Stopping crawler.")
+            if reached_old_date or reached_seen_limit:
+                if reached_old_date:
+                    self.logger.info("Reached articles older than start_date. Stopping crawler.")
                 break
 
             page_num += 1

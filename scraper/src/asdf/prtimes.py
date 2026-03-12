@@ -78,7 +78,7 @@ class PRTimesScraper(BaseScraper):
         yielded_count = 0
         sem = asyncio.Semaphore(5)  # 동시 요청 수 제한
         
-        # PR Times는 보통 UTF-8 인코딩을 잘 받아들입니다.
+        # PR Times는 보통 UTF-8 인코딩을 사용
         encoded_keyword = urllib.parse.quote(self.keyword)
         target_url = f"{self.config['base_url']}{self.config['search_path'].format(keyword=encoded_keyword)}"
         
@@ -95,6 +95,10 @@ class PRTimesScraper(BaseScraper):
         )
 
         previous_article_count = 0
+        
+        # 💡 [Early Stop] 연속 중복 카운터 설정
+        consecutive_seen_count = 0
+        MAX_CONSECUTIVE_SEEN = 5
 
         while True:
             if self.max_items > 0 and yielded_count >= self.max_items:
@@ -114,7 +118,7 @@ class PRTimesScraper(BaseScraper):
 
             articles = list_container.select(self.config["selectors"]["article_item"])
             
-            # 새롭게 불러온 기사가 없다면 더 이상 수집할 데이터가 없는 것으로 간주
+            # 새롭게 불러온 기사가 없다면(더보기 버튼을 눌렀는데도 갯수가 그대로라면) 종료
             if len(articles) <= previous_article_count:
                 self.logger.info("새로운 기사가 없습니다. 수집을 종료합니다.")
                 break
@@ -125,6 +129,7 @@ class PRTimesScraper(BaseScraper):
 
             tasks = []
             reached_old_date = False
+            reached_seen_limit = False # Early Stop 달성 여부 플래그
 
             for article in new_articles:
                 link_tag = article.select_one(self.config["selectors"]["article_link"])
@@ -155,8 +160,16 @@ class PRTimesScraper(BaseScraper):
                 if pub_date > self.end_date:
                     continue
 
+                # 💡 Early Stop 적용
                 if full_url in self.seen_urls:
+                    consecutive_seen_count += 1
+                    if consecutive_seen_count >= MAX_CONSECUTIVE_SEEN:
+                        self.logger.info(f"이미 수집한 기사가 연속 {MAX_CONSECUTIVE_SEEN}번 발견되어 조기 종료(Early Stop)합니다.")
+                        reached_seen_limit = True
+                        break
                     continue
+                else:
+                    consecutive_seen_count = 0
 
                 # 제목 추출
                 title_tag = article.select_one(self.config["selectors"]["article_title"])
@@ -176,13 +189,13 @@ class PRTimesScraper(BaseScraper):
                         yielded_count += 1
                         yield article_data
 
-            if reached_old_date:
-                self.logger.info("지정된 수집 기간(시작일) 이전 기사에 도달하여 수집을 종료합니다.")
+            # 💡 Early Stop 조건이거나 시작일에 도달했으면 while 무한루프(더보기 클릭) 탈출
+            if reached_old_date or reached_seen_limit:
+                if reached_old_date:
+                    self.logger.info("지정된 수집 기간(시작일) 이전 기사에 도달하여 수집을 종료합니다.")
                 break
 
-            # ----------------------------------------------------
             # 더보기 버튼 클릭을 위한 JS 스크립트 실행 (다음 루프 준비)
-            # ----------------------------------------------------
             js_code = f"""
             var btn = document.querySelector('{self.config["selectors"]["load_more_btn"]}');
             if (btn) {{
@@ -195,6 +208,6 @@ class PRTimesScraper(BaseScraper):
                 cache_mode=CacheMode.BYPASS,
                 session_id=session_id,
                 js_code=js_code,
-                wait_for=2 # 버튼 클릭 후 네트워크 요청과 DOM 렌더링을 기다리기 위한 대기 시간 (초)
+                delay_before_return_html=2.0
             )
             await asyncio.sleep(1)
