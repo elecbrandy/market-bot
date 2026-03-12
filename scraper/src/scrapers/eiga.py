@@ -25,22 +25,19 @@ eiga_config = {
 }
 
 class EigaScraper(BaseScraper):
-    """
-    Eiga.com에서 영화 관련 뉴스를 크롤링하는 스크래퍼입니다.
-     - 검색 URL: https://eiga.com/search/?q={keyword}&p={page}
-     - 기사 URL에서 날짜 추출: /news/20240101/ → 2024-01-01
-     - 기사 본문은 CSS 선택자 ".article-body"로 추출
-    """
+    """ Eiga.com에서 영화 관련 뉴스를 크롤링하는 스크래퍼입니다. """
 
     def __init__(self, crawler, keyword, start_date, end_date, seen_urls, max_items=0):
         super().__init__(crawler, keyword, start_date, end_date, seen_urls, max_items)
         self.source_name = "eiga"               # 스크래퍼 이름 설정
         self.config = eiga_config               # 크롤링 설정 초기화
+        self.logger = get_logger(self.source_name)
+
+        # 상태 관리 변수 초기화
         self.yielded_count = 0                  # yield된 기사 수 카운터 초기화
         self.previous_page_urls = set()         # 이전 페이지의 기사 URL 집합 (무한 루프 방지용)
         self.consecutive_seen_count = 0         # 연속으로 이미 본 기사가 나오는 횟수 카운터 (Early Stop용)
         self.sem = asyncio.Semaphore(self.sem_num)   # 한 번에 5개의 기사만 동시 크롤링 (서버 부하 방지)
-        self.logger = get_logger(self.source_name)
 
     
     async def scrape(self):
@@ -48,20 +45,19 @@ class EigaScraper(BaseScraper):
         
         page_num = 1    # 페이지 번호 초기화
 
-        # 검색 결과 페이지 순회 시작
         while not self._is_done():
             
-            # 페이지 데이터 가져오기
+            # 1. 페이지 데이터 가져오기
             links = await self._fetch_search_page(page_num)
             if not links or self._is_duplicate(links):
                 break
 
-            # 링크 목록에서 기사 데이터 수집 Task 생성
+            # 2. 링크 목록에서 기사 데이터 수집 Task 생성
             tasks, reached_old_date = self._prepare_tasks(links)
             if tasks:
                     # 생성된 Task들을 비동기로 한꺼번에 실행하여 기사 데이터 수집
-                    async for article in self._execute_tasks(tasks):
-                        yield article
+                    async for article_data in self._execute_tasks(tasks):
+                        yield article_data
 
             # 루프 탈출 여부 결정
             # - reached_old_date: 날짜 제한에 걸린 기사 발견 여부
@@ -82,7 +78,7 @@ class EigaScraper(BaseScraper):
         # 현재 페이지에서 추출된 기사 URL 집합 생성
         current_urls = {link.get("href") for link in links if link.get("href")}
         if current_urls == self.previous_page_urls:
-            self.logger.info("마지막 페이지 도달: 이전 페이지와 동일한 기사 URL이 발견되었습니다. 수집을 종료합니다.")
+            self.logger.info("마지막 페이지 도달, 수집을 종료합니다.")
             return True
         self.previous_page_urls = current_urls
         return False
@@ -95,7 +91,7 @@ class EigaScraper(BaseScraper):
             return datetime.strptime(match.group(1), "%Y%m%d").date()
         return None
     
-    def _prepare_tasks(self, links):
+    def _prepare_tasks(self, links) -> tuple:
         """수집할 기사들을 선별하고 tasks 리스트 작성"""
         tasks = []
         reached_old_date = False
@@ -124,14 +120,15 @@ class EigaScraper(BaseScraper):
     
     def _should_skip(self, url, pub_date):
         """기사를 스킵해야 하는지 판단 (중복 및 날짜 범위)"""
+        # 1. 미래 날짜 필터링
         if pub_date and pub_date > self.end_date:
             return True
-            
+        
+        # 2. 중복 체크 및 Early Stop 카운터
         if url in self.seen_urls:
             self.consecutive_seen_count += 1
             return True
-        
-        self.consecutive_seen_count = 0  # 새 기사 발견 시 초기화
+        self.consecutive_seen_count = 0  
         return False
 
     async def _execute_tasks(self, tasks):
@@ -167,7 +164,7 @@ class EigaScraper(BaseScraper):
                              title: str,                # 기사 제목 (목록 페이지에서 추출)
                              config: CrawlerRunConfig,  # 크롤링 설정 (본문 추출용)
         ) -> dict | None:
-        """ 개별 기사 페이지를 크롤링하여 기사 데이터를 반환하는 메소드입니다. """
+        """ 개별 기사의 본문을 추출합니다. """
 
         # 세마포어로 동시 크롤링 제어
         async with self.sem:
@@ -185,8 +182,12 @@ class EigaScraper(BaseScraper):
                     for s in soup.select(exclude_selectors):
                         s.decompose()
 
-                # 기사 본문 추출 (CSS 선택자 사용)
-                content = soup.get_text(separator="\n", strip=True) if soup else ""
+                # 기사 본문 추출
+                paragraphs = soup.find_all("p")
+                if paragraphs:
+                    content = "\n\n".join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
+                else:
+                    content = soup.get_text(separator="\n\n", strip=True)
 
                 return {
                     "source": self.source_name,     # 스크래퍼 이름
