@@ -67,6 +67,10 @@ test-scraper:
 	@sleep 3
 	docker compose --profile tools run --rm scraper
 
+# DB 데이터만 전부 삭제 (테이블 구조는 유지)
+flush-db:
+	docker compose exec -T db psql -U market_user -d market_db < flush_db.sql
+
 # DB만 띄운 상태에서 스크래퍼 로컬 실행
 test-scraper-local:
 	docker compose up -d db

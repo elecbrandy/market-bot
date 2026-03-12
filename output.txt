@@ -34,15 +34,12 @@ from src.utils.config import load_config
 from src.database import init_db, SessionLocal
 from src.runner import run_all
 from src.utils.logger import get_console
-from src.scrapers.eiga import EigaScraper
+from src.scrapers.base import BaseScraper
 
 console = get_console()
 
 # Scraper 클래스 목록
-SCRAPER_CLASSES = [
-    EigaScraper,
-]
-
+SCRAPER_CLASSES = BaseScraper.registry
 
 async def main():
     config = load_config()
@@ -88,6 +85,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy.dialects.postgresql import insert
 from crawl4ai import AsyncWebCrawler
 
+# asyncio 임포트
+import asyncio
+
 from src.models import News
 from src.utils.config import ScraperConfig
 from src.utils.logger import get_logger, get_console
@@ -99,7 +99,21 @@ async def load_seen_urls(db: Session) -> set[str]:
     """
     DB에 이미 저장된 뉴스 URL을 모두 불러와서 집합으로 반환합니다.
     """
-    return {row[0] for row in db.query(News.url).all()}
+    return await asyncio.to_thread(lambda: {row[0] for row in db.query(News.url).all()})
+
+async def save_batch(db: Session, batch: list[dict]) -> None:
+    if not batch:
+        return 0
+    
+    def _insert():
+        stmt = insert(News).values(batch)
+        stmt = stmt.on_conflict_do_nothing(index_elements=["url"])
+        result = db.execute(stmt)
+        db.commit()
+        return result.rowcount
+
+    # 비동기 흐름을 막지 않기 위해 별도 스레드에서 DB 쓰기
+    return await asyncio.to_thread(_insert)
 
 async def run_scraper(
     crawler:       AsyncWebCrawler,
@@ -116,29 +130,37 @@ async def run_scraper(
     # Scraper 인스턴스 생성
     scraper = ScraperClass(crawler, keyword, config.start_date, config.end_date, seen_urls, config.max_items)
     added_count = 0
+    batch = []
+    batch_size = 50
 
     # Scraper 실행 및 DB 저장
     async for news_data in scraper.scrape():
-        stmt = insert(News).values(
-            source         = news_data["source"],
-            keyword        = news_data["keyword"],
-            url            = news_data["url"],
-            title          = news_data["title"],
-            content        = news_data["content"],
-            published_date = news_data["published_date"],
-        )
-        stmt = stmt.on_conflict_do_nothing(index_elements=["url"])
-        db.execute(stmt)
-        db.commit()
-        added_count += 1
-        logger.info(f"[green]Saved[/green] [{news_data['published_date']}] {news_data['title'][:45]}")
+        batch.append({
+            "source":         news_data["source"],
+            "keyword":        news_data["keyword"],
+            "url":            news_data["url"],
+            "title":          news_data["title"],
+            "content":        news_data["content"],
+            "published_date": news_data["published_date"],
+        })
+        
+        logger.info(f"[green]Scraped[/green] [{news_data['published_date']}] {news_data['title'][:45]}")
+
+        if len(batch) >= batch_size:
+            saved = await save_batch(db, batch)
+            added_count += saved
+            batch.clear()
+
+    # 남은 데이터 처리
+    if batch:
+        saved = await save_batch(db, batch)
+        added_count += saved
 
     logger.info(
         f"[bold]{ScraperClass.__name__}[/bold] / [cyan]{keyword}[/cyan] "
-        f"— [bold green]{added_count}[/bold green] items saved."
+        f"— [bold green]{added_count}[/bold green] items saved to DB."
     )
     console.print()
-
     return added_count
 
 
@@ -154,13 +176,10 @@ async def run_all(
     seen_urls = await load_seen_urls(db)
     logger.info(f"[bold]{len(seen_urls)}[/bold] URLs already in DB — will skip duplicates.")
 
-    # 각 키워드와 스크래퍼 조합에 대해 순차적으로 실행
-    tasks = []
+    # 각 키워드와 스크래퍼 조합에 대해 순차적으로 실행 (Task 리스트에 담는 대신 바로 await 호출)
     for keyword in config.keywords:
         for ScraperClass in scraper_classes:
-            tasks.append(
-                run_scraper(crawler, db, ScraperClass, keyword, config, seen_urls)
-            )
+            await run_scraper(crawler, db, ScraperClass, keyword, config, seen_urls)
 ```
 
 ```
@@ -323,11 +342,13 @@ import re
 import asyncio
 from bs4 import BeautifulSoup
 from datetime import datetime
+from datetime import date
 
 from crawl4ai import CrawlerRunConfig, CacheMode
+from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+from crawl4ai.content_filter_strategy import PruningContentFilter
 
 from src.scrapers.base import BaseScraper
-from src.utils.selectors import SITE_CONFIG
 from src.utils.logger import get_logger
 
 
@@ -339,23 +360,24 @@ class EigaScraper(BaseScraper):
      - 기사 본문은 CSS 선택자 ".article-body"로 추출
     """
     source_name = "eiga"
-
+    
     config = {
         "base_url": "https://eiga.com",
         "search_path": "/search/{keyword}/news/{page}/",
         "selectors": {
             "news_container": "#rslt-news",
             "article_link": "div p.link > a",
-            "article_body": "div.news-detail, div.txt-block",
+            "article_body": "div.richtext", # <--- 이 부분
         },
         "regex": {
             "date_extract": r"/news/(\d{8})/"
         }
     }
+
     def __init__(self, crawler, keyword, start_date, end_date, seen_urls, max_items=0):
         super().__init__(crawler, keyword, start_date, end_date, seen_urls, max_items)
         self.source_name = "eiga"
-        self.config      = SITE_CONFIG[self.source_name]
+        self.config      = self.config
         self.logger      = get_logger(self.source_name)
 
     def _parse_date(self, url: str):
@@ -386,19 +408,32 @@ class EigaScraper(BaseScraper):
 
     async def scrape(self):
         """
-        Eiga.com에서 검색 결과 페이지를 순회하며 기사를 크롤링하는 제너레이터입니다.
+        Eiga.com에서 검색 결과 페이지를 순회하며 기사 링크를 수집하고, 각 기사 페이지를 크롤링하여 데이터를 yield 합니다.
         """
-        page_num      = 1 # 페이지 번호 초기화
-        yielded_count = 0 # 수집된 기사 수 카운터
+        page_num = 1
+        yielded_count = 0
+        sem = asyncio.Semaphore(5)  # 한 번에 5개의 기사만 동시 크롤링 (서버 부하 방지)
+
+        md_generator = DefaultMarkdownGenerator(
+            content_filter=PruningContentFilter(
+                threshold=0.45,         # 텍스트 밀도와 링크 밀도를 계산해 노이즈를 날리는 기준 (보통 0.4~0.5 사이)
+                threshold_type="fixed",
+                min_word_threshold=7   # 단어가 너무 적은 쓰레기 블록 무시
+            ),
+            options={
+                "ignore_links": True,   # [텍스트](https...) 형태에서 URL 날리고 '텍스트'만 유지 (소셜 공유 버튼 초토화)
+                "ignore_images": True,  # ![이미지](https...) 제거 (광고 배너 초토화)
+            }
+        )
 
         article_run_config = CrawlerRunConfig(
             cache_mode=CacheMode.BYPASS,
             css_selector=self.config["selectors"].get("article_body"),
+            markdown_generator=md_generator
         )
 
         while True:
             if self.max_items > 0 and yielded_count >= self.max_items:
-                self.logger.info(f"Reached max limit ({self.max_items}). Stopping.")
                 break
 
             search_path = self.config["search_path"].format(keyword=self.keyword, page=page_num)
@@ -408,33 +443,28 @@ class EigaScraper(BaseScraper):
             result = await self.crawler.arun(url=target_url, config=list_run_config)
 
             if not result.success:
-                self.logger.warning(f"Failed to load page {page_num}. Stopping.")
                 break
 
-            soup         = BeautifulSoup(result.html, "html.parser")
+            soup = BeautifulSoup(result.html, "html.parser")
             news_section = soup.select_one(self.config["selectors"]["news_container"])
-            links        = news_section.select(self.config["selectors"]["article_link"]) if news_section else []
+            links = news_section.select(self.config["selectors"]["article_link"]) if news_section else []
 
             if not links:
-                self.logger.info(f"No more articles on page {page_num}.")
                 break
 
+            # 1. 크롤링할 대상 Task를 먼저 수집
+            tasks = []
             reached_old_date = False
 
             for link in links:
-                if self.max_items > 0 and yielded_count >= self.max_items:
-                    break
-
                 href = link.get("href")
-                if not href:
-                    continue
+                if not href: continue
 
                 full_url = f"https://eiga.com{href}" if href.startswith("/") else href
                 pub_date = self._parse_date(full_url)
 
                 if pub_date:
                     if pub_date < self.start_date:
-                        self.logger.info(f"Reached articles older than {self.start_date}. Stopping.")
                         reached_old_date = True
                         break
                     if pub_date > self.end_date:
@@ -442,35 +472,39 @@ class EigaScraper(BaseScraper):
 
                 if full_url in self.seen_urls:
                     continue
+                
+                # _fetch_article 메서드를 활용하여 Task 리스트에 추가
+                title = link.text.strip()
+                tasks.append(self._fetch_article(full_url, pub_date, title, article_run_config, sem))
 
-                article_result = await self.crawler.arun(url=full_url, config=article_run_config)
-
-                if article_result.success:
-                    yield {
-                        "source":         self.source_name,
-                        "keyword":        self.keyword,
-                        "url":            full_url,
-                        "title":          link.text.strip(),
-                        "content":        article_result.markdown.strip() if article_result.markdown else "",
-                        "published_date": pub_date,
-                    }
-                    self.seen_urls.add(full_url)
-                    yielded_count += 1
-
-                await asyncio.sleep(1)
+            # 2. 수집된 Task들을 비동기로 한꺼번에 실행
+            if tasks:
+                results = await asyncio.gather(*tasks)
+                for article_data in results:
+                    if article_data and (self.max_items == 0 or yielded_count < self.max_items):
+                        self.seen_urls.add(article_data["url"])
+                        yielded_count += 1
+                        yield article_data
 
             if reached_old_date:
                 break
 
             page_num += 1
-            await asyncio.sleep(1.5)
-
+            await asyncio.sleep(1) # 페이지 단위 요청 간격만 유지
 ```
 
 ```
 ./scraper/src/scrapers/__init__.py
 
+import pkgutil
+import importlib
+from pathlib import Path
 
+# 현재 패키지 내의 모든 모듈을 순회하며 자동 import
+package_dir = Path(__file__).resolve().parent
+for _, module_name, _ in pkgutil.iter_modules([str(package_dir)]):
+    if module_name != "base":
+        importlib.import_module(f".{module_name}", package=__name__)
 ```
 
 ```
@@ -481,6 +515,7 @@ from typing import AsyncGenerator, Dict, Any
 from datetime import date
 from crawl4ai import AsyncWebCrawler
 from src.utils.logger import get_logger
+from typing import Type
 import os
 
 os.environ["CRAWL4AI_VERBOSE"] = "false" 

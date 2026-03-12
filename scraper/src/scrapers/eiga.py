@@ -5,6 +5,8 @@ from datetime import datetime
 from datetime import date
 
 from crawl4ai import CrawlerRunConfig, CacheMode
+from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+from crawl4ai.content_filter_strategy import PruningContentFilter
 
 from src.scrapers.base import BaseScraper
 from src.utils.logger import get_logger
@@ -18,19 +20,20 @@ class EigaScraper(BaseScraper):
      - 기사 본문은 CSS 선택자 ".article-body"로 추출
     """
     source_name = "eiga"
-
+    
     config = {
         "base_url": "https://eiga.com",
         "search_path": "/search/{keyword}/news/{page}/",
         "selectors": {
             "news_container": "#rslt-news",
             "article_link": "div p.link > a",
-            "article_body": "div.news-detail, div.txt-block",
+            "article_body": "div.richtext", # <--- 이 부분
         },
         "regex": {
             "date_extract": r"/news/(\d{8})/"
         }
     }
+
     def __init__(self, crawler, keyword, start_date, end_date, seen_urls, max_items=0):
         super().__init__(crawler, keyword, start_date, end_date, seen_urls, max_items)
         self.source_name = "eiga"
@@ -71,9 +74,23 @@ class EigaScraper(BaseScraper):
         yielded_count = 0
         sem = asyncio.Semaphore(5)  # 한 번에 5개의 기사만 동시 크롤링 (서버 부하 방지)
 
+        md_generator = DefaultMarkdownGenerator(
+            content_filter=PruningContentFilter(
+                threshold=0.45,         # 텍스트 밀도와 링크 밀도를 계산해 노이즈를 날리는 기준 (보통 0.4~0.5 사이)
+                threshold_type="fixed",
+                min_word_threshold=7   # 단어가 너무 적은 쓰레기 블록 무시
+            ),
+            options={
+                "ignore_links": True,   # [텍스트](https...) 형태에서 URL 날리고 '텍스트'만 유지 (소셜 공유 버튼 초토화)
+                "ignore_images": True,  # ![이미지](https...) 제거 (광고 배너 초토화)
+            }
+        )
+
         article_run_config = CrawlerRunConfig(
             cache_mode=CacheMode.BYPASS,
             css_selector=self.config["selectors"].get("article_body"),
+            # excluded_selector=self.config.get("exclude"),
+            markdown_generator=md_generator
         )
 
         while True:
