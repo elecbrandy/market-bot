@@ -84,7 +84,7 @@ class EigaScraper(BaseScraper):
         return False
     
     def _parse_date(self, url: str) -> date | None:
-        """ 기사 URL에서 날짜를 추출하는 메소드 """
+        """ 기사 URL에서 날짜를 추출 """
 
         match = re.search(self.config["regex"]["date_extract"], url)
         if match:
