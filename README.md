@@ -5,6 +5,22 @@
 
 <br>
 
+## 개발일지
+- Frontend
+  - 사용자가 키워드, 기간, 최소 기사 갯수 입력하여 scraping+embedding 될 수 있게
+  - Vue.js로 전환
+- Backend
+  - 우선 fast api로 Oauth 인증 구현
+  - 나중에 spring 으로 인증단 전환
+- Scraper
+  - 따로 배포? 혹은 github action..? 고민중
+- RAG
+  - Reranker 등 적용
+  - 더 많은 기능 + 프롬프팅 넣기
+
+
+<br>
+
 ## 기술 스택
 
 - **Language:** Python 3.11
