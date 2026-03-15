@@ -1,70 +1,82 @@
-import gradio as gr
+import streamlit as st
 import requests
 import os
 
-# Docker Compose 내부 네트워크를 사용하므로 컨테이너 이름(backend)으로 통신합니다.
-BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8080")
 
-def predict(input_text: str) -> str:
-    """사용자 질문을 백엔드로 보내 답변을 받아오는 함수"""
-    if not input_text.strip():
-        return "질문을 입력해주세요."
+# 페이지 기본 설정
+st.set_page_config(page_title="Anime RAG Chatbot", page_icon="🎌", layout="wide")
+
+# 세션 상태 초기화 (대화 기록 저장용)
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# ==========================================
+# 사이드바 (관리 기능)
+# ==========================================
+with st.sidebar:
+    st.header("⚙️ 관리")
     
-    try:
-        response = requests.post(
-            f"{BACKEND_URL}/chat",
-            json={"query": input_text},
-            timeout=30
-        )
-        response.raise_for_status()
-        
-        data = response.json()
-        return data.get("answer", "응답을 파싱할 수 없습니다.")
-        
-    except Exception as e:
-        return f"오류가 발생했습니다: {str(e)}"
-
-def trigger_embedding() -> str:
-    """백엔드의 임베딩 API를 호출하는 함수"""
-    try:
-        # 임베딩은 시간이 좀 걸릴 수 있으므로 timeout을 넉넉히 줍니다.
-        response = requests.post(f"{BACKEND_URL}/embed/run", timeout=120)
-        response.raise_for_status()
-        
-        data = response.json()
-        count = data.get("processed_count", 0)
-        return f"✅ 임베딩 완료! (새롭게 처리된 뉴스 문서 수: {count}개)"
-        
-    except Exception as e:
-        return f"❌ 임베딩 중 오류 발생: {str(e)}"
-
-# 화면 레이아웃 구성 (gr.Blocks 활용)
-with gr.Blocks(title="Market RAG Chatbot") as demo:
-    gr.Markdown("# 📈 Market RAG AI Chatbot")
-    gr.Markdown("수집된 뉴스 데이터를 기반으로 답변을 제공합니다. 데이터가 추가되었다면 먼저 **임베딩 실행** 버튼을 눌러주세요.")
+    # 데이터 임베딩 버튼
+    if st.button("데이터 임베딩 실행", type="primary", use_container_width=True):
+        with st.spinner("임베딩 진행 중... 잠시만 기다려주세요."):
+            try:
+                response = requests.post(f"{BACKEND_URL}/embed/run", timeout=120)
+                response.raise_for_status()
+                count = response.json().get("processed_count", 0)
+                st.success(f"✅ 임베딩 완료! (처리된 문서 수: {count}개)")
+            except Exception as e:
+                st.error(f"❌ 임베딩 오류: {str(e)}")
     
-    with gr.Row():
-        # 왼쪽 단: 챗봇 영역
-        with gr.Column(scale=3):
-            chatbot_output = gr.Textbox(label="RAG AI 응답", lines=10, interactive=False)
-            user_input = gr.Textbox(label="질문 입력", placeholder="예: 최근 미국 금리 인상과 관련된 뉴스가 있나요?")
+    st.divider()
+    
+    # 대화 초기화 버튼
+    if st.button("대화 초기화", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+# ==========================================
+# 메인 화면
+# ==========================================
+st.title("tmp Anime RAG Chatbot")
+st.markdown("최신 애니메이션 뉴스를 기반으로 답변합니다.")
+
+# 기존 대화 기록 렌더링
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# 사용자 입력 처리
+if prompt := st.chat_input("질문을 입력하세요... (Enter로 전송)"):
+    # 1. 사용자 메시지 화면에 출력 및 상태 저장
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # 2. 챗봇 응답 대기 및 출력
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        message_placeholder.markdown("답변을 생성하고 있습니다... ⏳")
+        
+        try:
+            # Backend API 호출 (현재까지의 모든 대화 기록 전송)
+            response = requests.post(
+                f"{BACKEND_URL}/chat",
+                json={"messages": st.session_state.messages},
+                timeout=30
+            )
+            response.raise_for_status()
+            answer = response.json().get("answer", "응답을 파싱할 수 없습니다.")
             
-            with gr.Row():
-                clear_btn = gr.ClearButton([user_input, chatbot_output], value="초기화")
-                submit_btn = gr.Button("질문 전송", variant="primary")
-        
-        # 오른쪽 단: 관리/기능 영역
-        with gr.Column(scale=1):
-            gr.Markdown("### ⚙️ 시스템 관리")
-            embed_btn = gr.Button("데이터 임베딩 실행", variant="secondary")
-            embed_output = gr.Textbox(label="임베딩 처리 결과", lines=2, interactive=False)
-
-    # 이벤트 연결
-    submit_btn.click(predict, inputs=user_input, outputs=chatbot_output)
-    user_input.submit(predict, inputs=user_input, outputs=chatbot_output) # 엔터키 지원
-    
-    embed_btn.click(trigger_embedding, inputs=None, outputs=embed_output)
-
-if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=3000)
-    
+            # 응답 출력 및 상태 저장
+            message_placeholder.markdown(answer)
+            st.session_state.messages.append({"role": "assistant", "content": answer})
+            
+        except requests.exceptions.Timeout:
+            error_msg = "오류: 백엔드 응답 시간이 초과되었습니다."
+            message_placeholder.error(error_msg)
+            st.session_state.messages.append({"role": "assistant", "content": error_msg})
+        except Exception as e:
+            error_msg = f"오류가 발생했습니다: {str(e)}"
+            message_placeholder.error(error_msg)
+            st.session_state.messages.append({"role": "assistant", "content": error_msg})

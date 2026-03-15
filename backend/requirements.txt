@@ -17,6 +17,7 @@ langchain
 langchain-core
 langchain-openai
 langchain-chroma
+langgraph
 
 # 5. Vector Database
 chromadb

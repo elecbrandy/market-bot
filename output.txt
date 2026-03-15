@@ -10,23 +10,97 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-EXPOSE 3000
+EXPOSE 8501
 
-CMD ["python", "app.py"]
+CMD ["streamlit", "run", "main.py", "--server.port=8501", "--server.address=0.0.0.0"]
 ```
 
 ```
 ./frontend/main.py
 
-import gradio as gr
+import streamlit as st
+import requests
+import os
 
-def predict(input_text: str) -> str:
-    return f"응답: {input_text}"
+BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
-demo = gr.Interface(fn=predict, inputs="text", outputs="text")
+# 페이지 기본 설정
+st.set_page_config(page_title="Anime RAG Chatbot", page_icon="🎌", layout="wide")
 
-if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=3000)
+# 세션 상태 초기화 (대화 기록 저장용)
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# ==========================================
+# 사이드바 (관리 기능)
+# ==========================================
+with st.sidebar:
+    st.header("⚙️ 관리")
+    
+    # 데이터 임베딩 버튼
+    if st.button("데이터 임베딩 실행", type="primary", use_container_width=True):
+        with st.spinner("임베딩 진행 중... 잠시만 기다려주세요."):
+            try:
+                response = requests.post(f"{BACKEND_URL}/embed/run", timeout=120)
+                response.raise_for_status()
+                count = response.json().get("processed_count", 0)
+                st.success(f"✅ 임베딩 완료! (처리된 문서 수: {count}개)")
+            except Exception as e:
+                st.error(f"❌ 임베딩 오류: {str(e)}")
+    
+    st.divider()
+    
+    # 대화 초기화 버튼
+    if st.button("대화 초기화", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+# ==========================================
+# 메인 화면
+# ==========================================
+st.title("🎌 일본 애니메이션 뉴스 AI 챗봇")
+st.markdown("최신 애니메이션 뉴스를 기반으로 답변합니다.")
+
+# 기존 대화 기록 렌더링
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# 사용자 입력 처리
+if prompt := st.chat_input("질문을 입력하세요... (Enter로 전송)"):
+    # 1. 사용자 메시지 화면에 출력 및 상태 저장
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # 2. 챗봇 응답 대기 및 출력
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        message_placeholder.markdown("답변을 생성하고 있습니다... ⏳")
+        
+        try:
+            # Backend API 호출 (현재까지의 모든 대화 기록 전송)
+            response = requests.post(
+                f"{BACKEND_URL}/chat",
+                json={"messages": st.session_state.messages},
+                timeout=30
+            )
+            response.raise_for_status()
+            answer = response.json().get("answer", "응답을 파싱할 수 없습니다.")
+            
+            # 응답 출력 및 상태 저장
+            message_placeholder.markdown(answer)
+            st.session_state.messages.append({"role": "assistant", "content": answer})
+            
+        except requests.exceptions.Timeout:
+            error_msg = "오류: 백엔드 응답 시간이 초과되었습니다."
+            message_placeholder.error(error_msg)
+            st.session_state.messages.append({"role": "assistant", "content": error_msg})
+        except Exception as e:
+            error_msg = f"오류가 발생했습니다: {str(e)}"
+            message_placeholder.error(error_msg)
+            st.session_state.messages.append({"role": "assistant", "content": error_msg})
+
 ```
 
 ```
@@ -155,13 +229,38 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 ```
 
 ```
 ./backend/main.py
 
+from fastapi import FastAPI
+from contextlib import asynccontextmanager
 
+from src.core.database import init_db
+from src.api.router import router
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 서버 시작 시 데이터베이스 테이블 생성
+    init_db()
+    yield
+    # 서버 종료 시 필요한 로직이 있다면 여기에 추가
+
+app = FastAPI(
+    title="Market RAG API",
+    description="뉴스 데이터를 기반으로 답변을 생성하는 RAG API",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# 라우터 등록
+app.include_router(router)
+
+@app.get("/")
+def root():
+    return {"message": "Market RAG API is running!"}
 ```
 
 ```
@@ -199,7 +298,7 @@ settings = Settings()
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from backend.src.core.model import Base
+from src.core.model import Base
 
 DB_USER = os.getenv("POSTGRES_USER", "postgres")
 DB_PASSWORD = os.getenv("POSTGRES_PASSWORD", "postgres")
@@ -259,7 +358,11 @@ class News(Base):
 ```
 ./backend/src/api/request.py
 
+from pydantic import BaseModel
+from typing import List, Dict
 
+class ChatRequest(BaseModel):
+    messages: List[Dict[str, str]]
 ```
 
 ```
@@ -271,13 +374,42 @@ class News(Base):
 ```
 ./backend/src/api/response.py
 
+from pydantic import BaseModel
+
+class EmbedResponse(BaseModel):
+    message: str
+    processed_count: int
+
+class ChatResponse(BaseModel):
+    answer: str
 
 ```
 
 ```
 ./backend/src/api/router.py
 
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 
+from src.core.database import get_db
+from src.api.request import ChatRequest
+from src.api.response import ChatResponse, EmbedResponse
+from src.service.embedding import run_embedding
+from src.service.rag import generate_answer
+
+router = APIRouter()
+
+@router.post("/embed/run", response_model=EmbedResponse)
+def trigger_embedding(db: Session = Depends(get_db)):
+    """RDB에 있는 새로운 뉴스를 ChromaDB로 임베딩합니다."""
+    count = run_embedding(db)
+    return EmbedResponse(message="Embedding process completed.", processed_count=count)
+
+@router.post("/chat", response_model=ChatResponse)
+def chat_with_rag(request: ChatRequest):
+    """사용자의 질문을 받아 RAG 기반의 답변을 반환합니다."""
+    answer = generate_answer(request.messages)
+    return ChatResponse(answer=answer)
 ```
 
 ```
@@ -287,8 +419,8 @@ import chromadb
 from sqlalchemy.orm import Session
 from langchain_openai import OpenAIEmbeddings
 from langchain_chroma import Chroma
-from langchain.schema import Document
-from src.service.model import News  # SQLAlchemy 모델
+from langchain_core.documents import Document
+from src.core.model import News
 from src.core.config import settings
 
 # ChromaDB 클라이언트와 OpenAI 임베딩 모델 초기화
@@ -296,9 +428,9 @@ chroma_client = chromadb.HttpClient(host="vector_db", port=settings.VECTOR_DB_PO
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=settings.OPENAI_API_KEY)
 
 vector_store = Chroma(
-    chroma_client=chroma_client,
+    client=chroma_client,
     collection_name="market_news_embeddings",
-
+    embedding_function=embeddings
 )
 
 def run_embedding(db: Session) -> int:
@@ -313,7 +445,7 @@ def run_embedding(db: Session) -> int:
     for article in new_articles:
         # 뉴스 데이터를 Document 객체로 변환
         doc = Document(
-            content=article.content,
+            page_content=article.content,
             metadata={
                 "id": str(article.id),
                 "source": article.source,
@@ -348,39 +480,127 @@ def run_embedding(db: Session) -> int:
 ```
 ./backend/src/service/rag.py
 
+from typing import Annotated, Sequence, TypedDict
+from langchain_core.documents import Document
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from src.service.embedding import vector_store
 
-# llm 초기화
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
 
-def generate_answer(query: str) -> str:
-    """사용자 질문에 대한 답변 생성"""
+# State) 정의
+class GraphState(TypedDict):
+    """
+    그래프 실행 중에 유지되는 상태를 정의하는 TypedDict.
+    - messages:
+        - 대화 기록을 저장하는 리스트
+        - 프론트엔드에서 넘어온 dict 형태의 대화 기록을 LangChain 메시지로 변환하여 저장
+    - context:
+        - 검색 노드에서 ChromaDB로부터 가져온 관련 뉴스 기사들의 내용을 저장하는 문자열
+        - 답변 생성 노드에서 시스템 프롬프트에 포함되어 LLM이 참고할 수 있도록 함
+    """
+    messages: Annotated[Sequence[BaseMessage], add_messages]
+    context: str
+
+
+# 검색 노드 (Retrieve)
+def retrieve_node(state: GraphState):
+    # 가장 최근 사용자 질문 가져오기
+    recent_msg = state["messages"][-1].content
     
-    # ChromaDB에서 유사한 문서 검색
-    results = vector_store.similarity_search(query, k=5)
-    
+    # ChromaDB 검색
+    results: list[Document] = vector_store.similarity_search(recent_msg, k=5)
     if not results:
-        return "관련된 뉴스 기사를 찾을 수 없습니다."
+        return {"context": "관련된 뉴스 기사를 찾을 수 없습니다."}
+        
+    # 출처(URL, 제목)를 포함해 context 구성
+    context_parts = []
+    for doc in results:
+        title = doc.metadata.get('title', '제목 없음')
+        url = doc.metadata.get('url', '#')
+        content = doc.page_content
+        context_parts.append(f"Source: [{title}]({url})\nContent: {content}")
+    
+    context = "\n\n---\n\n".join(context_parts)
+    context = context.replace("{", "{{").replace("}", "}}")  # ← join 이후에
+    return {"context": context}
 
-    # 검색된 문서에서 콘텐츠와 메타데이터 추출
-    context = "\n\n".join([f"Title: {doc.metadata['title']}\nContent: {doc.content}" for doc in results])
+# 답변 생성 노드
+def generate_node(state: GraphState):
 
-    # 프롬프트 템플릿 생성
-    prompt_template = ChatPromptTemplate.from_messages([
-        ("system", "You are a helpful assistant that provides answers based on the following news articles:\n{context}"),
-        ("user", "{query}")
+    # 프론트엔드에서 넘어온 dict 형태의 대화 기록을 LangChain 메시지로 변환하여 상태에 저장
+    messages = state["messages"]
+    context = state.get("context", "")
+    
+    system_prompt = (
+        "You are an expert assistant specializing in Japanese anime news.\n"
+        "Answer the user's question based ONLY on the provided news articles below.\n"
+        "If the answer cannot be found in the articles, say '제공된 뉴스에서 관련 정보를 찾을 수 없습니다.' and do not make up information.\n"
+        "Always respond in Korean unless the user asks otherwise.\n"
+        "At the end of your answer, list the referenced articles in markdown format as:\n"
+        "#### 참고 기사\n- [기사 제목](링크)\n\n"
+        f"Context:\n{context}"
+    )
+    
+    # 프롬프트 템플릿에 시스템 메시지와 전체 대화 기록(MessagesPlaceholder) 삽입
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        MessagesPlaceholder(variable_name="messages"),
     ])
+    
+    chain = prompt | llm
+    response = chain.invoke({"messages": messages})
+    
+    # 상태 업데이트용 메시지 반환
+    return {"messages": [response]}
 
-    # 프롬프트에 컨텍스트와 사용자 질문 삽입
-    prompt = prompt_template.format(context=context, query=query)
+# 조건부 노드 (Conditional)
+def should_generate(state: GraphState):
+    if state["context"] == "관련된 뉴스 기사를 찾을 수 없습니다.":
+        return "end"
+    return "generate"
 
-    # LLM을 사용하여 답변 생성
-    answer = llm(prompt)
+# 4. 그래프(Workflow) 구성
+workflow = StateGraph(GraphState)
+workflow.add_node("retrieve", retrieve_node)
+workflow.add_node("generate", generate_node)
 
-    return answer
+# 노드 연결
+workflow.add_edge(START, "retrieve")
+workflow.add_conditional_edges(
+    "retrieve",
+    should_generate,
+    {
+        "generate": "generate",
+        "end": END
+    }
+)
+workflow.add_edge("generate", END)
 
+# 앱 컴파일
+rag_app = workflow.compile()
+
+# API에서 호출할 최종 함수
+def generate_answer(messages_dicts: list) -> str:
+    """프론트엔드에서 넘어온 dict 형태의 대화 기록을 LangChain 메시지로 변환 후 그래프 실행"""
+
+    if not messages_dicts:
+        return "질문을 입력해주세요."
+    langchain_messages = []
+    for msg in messages_dicts:
+        if msg["role"] == "user":
+            langchain_messages.append(HumanMessage(content=msg["content"]))
+        elif msg["role"] == "assistant":
+            langchain_messages.append(AIMessage(content=msg["content"]))
+    
+    # 그래프 실행 (invoke)
+    result = rag_app.invoke({"messages": langchain_messages})
+    
+    # 마지막 AI 응답 추출
+    return result["messages"][-1].content
 ```
 
 ```
@@ -447,6 +667,8 @@ services:
     container_name: ${FRONTEND_CONTAINER}
     ports:
       - "${FRONTEND_PORT}:3000"
+    environment:
+      - BACKEND_URL=http://backend:8000
     volumes:
       - ./frontend:/app
     networks:
@@ -459,7 +681,7 @@ services:
     ports:
       - "${VECTOR_DB_PORT}:8000"
     volumes:
-      - ./volumes/_chroma:/chroma/chroma
+      - ./volumes/chroma:/chroma/chroma
     networks:
       - market_net
 

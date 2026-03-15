@@ -40,7 +40,7 @@ services:
       context: ./backend
     container_name: ${BACKEND_CONTAINER}
     ports:
-      - "${BACKEND_PORT}:8000"
+      - "${BACKEND_PORT}:8080"
     env_file:
       - .env
     volumes:
@@ -58,7 +58,9 @@ services:
       context: ./frontend
     container_name: ${FRONTEND_CONTAINER}
     ports:
-      - "${FRONTEND_PORT}:3000"
+      - "${FRONTEND_PORT}:8501"
+    environment:
+      - BACKEND_URL=http://backend:8080
     volumes:
       - ./frontend:/app
     networks:
@@ -72,6 +74,9 @@ services:
       - "${VECTOR_DB_PORT}:8000"
     volumes:
       - ./volumes/chroma:/chroma/chroma
+    environment:
+      - IS_PERSISTENCE=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
     networks:
       - market_net
 
