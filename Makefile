@@ -1,30 +1,35 @@
-.PHONY: up down build rebuild restart logs logs-backend logs-frontend logs-db logs-vectordb ps scrape clean fclean
+# .env 파일 로드
+ifneq (,$(wildcard ./.env))
+    include .env
+    export
+endif
 
-# 전체 서비스 시작 (scraper 제외)
+.PHONY: up down build rebuild restart logs logs-backend logs-frontend logs-db logs-vectordb ps up-db scrape test-scraper test-scraper-local embed sh-backend restart-backend rebuild-backend restart-frontend rebuild-frontend flush-db flush-vector flush-all clean fclean
+
+# 1. 서비스 기본 제어
 up:
 	docker compose up -d
 
-# 전체 서비스 중지
 down:
 	docker compose down
 
-# 전체 빌드
 build:
 	docker compose build
 
-# 빌드 후 시작
 rebuild:
 	docker compose down && docker compose build && docker compose up -d
 
-# 재시작
 restart:
 	docker compose restart
 
-# 로그 확인 (전체)
+ps:
+	docker compose ps
+
+
+# 2. 로그 확인
 logs:
 	docker compose logs -f
 
-# 개별 로그
 logs-backend:
 	docker compose logs -f backend
 
@@ -37,49 +42,65 @@ logs-db:
 logs-vectordb:
 	docker compose logs -f vector_db
 
-# 컨테이너 상태 확인
-ps:
-	docker compose ps
 
-# 스크래퍼 실행 (profiles: tools)
+# 3. 개발 및 테스트 (단일 컨테이너 제어)
+sh-backend:
+	docker compose exec backend /bin/bash
+
+restart-backend:
+	docker compose restart backend
+
+rebuild-backend:
+	docker compose up -d --build backend
+
+restart-frontend:
+	docker compose restart frontend
+
+rebuild-frontend:
+	docker compose up -d --build frontend
+
+
+# 4. 데이터 수집 및 임베딩 로직
+up-db:
+	docker compose up -d db
+
 scrape:
 	docker compose --profile tools run --rm scraper
 
-# 컨테이너만 삭제
+test-scraper:
+	docker compose up -d db
+	@sleep 3
+	docker compose --profile tools run --rm scraper
+
+test-scraper-local:
+	docker compose up -d db
+	@sleep 3
+	cd scraper && DB_CONTAINER=127.0.0.1 venv/bin/python3.11 main.py
+
+embed:
+	curl -X POST http://localhost:$(BACKEND_PORT)/embed/run
+
+
+# 5. 데이터 초기화
+flush-db:
+	@echo "PostgreSQL 데이터를 삭제하시겠습니까? [y/N] " && read ans && [ $${ans:-N} = y ]
+	rm -rf ./volumes/postgres/*
+	docker compose exec -T db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) < flush_db.sql
+
+flush-vector:
+	@echo "ChromaDB 데이터를 삭제하시겠습니까? [y/N] " && read ans && [ $${ans:-N} = y ]
+	docker compose stop vector_db
+	rm -rf ./volumes/chroma/*
+	docker compose start vector_db
+
+flush-all: flush-db flush-vector
+
+
+# 6. 시스템 정리 (Clean up)
 clean:
 	docker compose down --remove-orphans
 
-# 컨테이너 + 볼륨 + 이미지 + 빌드캐시 전부 삭제 (주의!)
 fclean:
 	docker compose down -v --remove-orphans
 	docker image prune -af
 	docker builder prune -af
-	rm -rf ./volumes/*
-
-# DB만 백그라운드로 단독 실행
-up-db:
-	docker compose up -d db
-
-# DB 실행 후 스크래퍼 원큐에 테스트하기
-test-scraper:
-	docker compose up -d db
-	@echo "DB가 준비될 때까지 3초 대기합니다..."
-	@sleep 3
-	docker compose --profile tools run --rm scraper
-
-# # DB 데이터만 전부 삭제 (테이블 구조는 유지)
-# flush-db:
-# 	docker compose exec -T db psql -U market_user -d market_db < flush_db.sql
-
-# DB만 띄운 상태에서 스크래퍼 로컬 실행
-test-scraper-local:
-	docker compose up -d db
-	@echo "DB가 준비될 때까지 3초 대기..."
-	@sleep 3
-	cd scraper && DB_CONTAINER=127.0.0.1 venv/bin/python3.11 main.py
-
-sh-backend:
-	docker compose exec backend /bin/bash
-
-rebuild-backend:
-	docker compose up -d --build backend

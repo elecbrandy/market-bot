@@ -1,36 +1,62 @@
+# Market News RAG System
 
+- 뉴스 기사를 수집하고, 이를 기반으로 사용자의 질의에 답변하는 RAG 시스템입니다.
+- FastAPI 기반의 백엔드와 Gradio 프론트엔드, 그리고 벡터 DB를 Docker Compose로 통합하여 구성했습니다.
 
-### 작업 대상
+<br>
 
-- **나탈리 (Comic)** [`natalie.mu/comic/news`](https://natalie.mu/comic/news)
-  애니메이션/만화 관련 가장 디테일한 속보 수집
+## 기술 스택
 
-- **오리콘 뉴스** [`oricon.co.jp/news/rankset/anime/`](https://oricon.co.jp/news/rankset/anime/)
-  대중적인 인지도와 성우, 차트 데이터 확보
+- **Language:** Python 3.11
+- **Backend:** FastAPI, Uvicorn, SQLAlchemy
+- **Frontend:** Gradio
+- **AI / RAG:** LangChain, LangGraph, OpenAI (`gpt-4o-mini`, `text-embedding-3-small`)
+- **Database:** PostgreSQL (RDB), ChromaDB (VectorDB)
 
-- **애니메이트 타임즈** [`animatetimes.com`](https://animatetimes.com)
-  팬덤 반응, 성우 인터뷰, 굿즈 출시 정보
+<br>
 
-- [x] **PR TIMES (엔터)** [`prtimes.jp/.../entertainment`](https://prtimes.jp/main/html/searchrlp/ct/entertainment)
-  기업 배포 공식 보도자료 (오피셜 팩트 체크용)
+## 환경 설정
 
-- [x] **에이가 (뉴스)** [`eiga.com/news/anime/`](https://eiga.com/news/anime/)
-  애니메이션 영화 특화 소식 및 심층 기사
+``` ini
+POSTGRES_USER=market_user
+POSTGRES_PASSWORD=market_password
+POSTGRES_DB=market_db
+POSTGRES_PORT=5432
+DB_CONTAINER=db
 
-- **에이가 (랭킹)** [`eiga.com/ranking/`](https://eiga.com/ranking/)
-  주간 박스오피스 순위 및 흥행 추이 데이터
+VECTOR_DB_CONTAINER=vector_db
+VECTOR_DB_PORT=8000
 
-- **흥행통신사** [`kogyotsushin.com/archives/weekend/`](https://kogyotsushin.com/archives/weekend/)
-  일본 박스오피스 공식 동원 수/수입액 데이터
+BACKEND_CONTAINER=backend
+BACKEND_PORT=8000
 
-- **Filmarks (리뷰)** [`filmarks.com/movies/ranking/anime`](https://filmarks.com/movies/ranking/anime)
-  일본 최대 리뷰 사이트의 실제 관객 평점 데이터
+FRONTEND_CONTAINER=frontend
+FRONTEND_PORT=3000
 
-- **애니메이션 비즈니스** [`animationbusiness.info`](https://animationbusiness.info)
-  업계 구조 변화, 해외 전개, 기업 실적 분석
+# OpenAI API Key
+OPENAI_API_KEY=your-openai-api-key
 
-- **GameBiz (애니)** [`gamebiz.jp/news/category/1`](https://gamebiz.jp/news/category/1)
-  IP 관련 비즈니스 협업 및 게임화 소식
+```
 
-- **MANTANWEB** [`mantan-web.jp/anime/`](https://mantan-web.jp/anime/)
-  애니메이션 비즈니스 및 성우 관련 가벼운 가십/뉴스
+<br>
+
+## 실행 방법
+
+> 현재 개발용 서술
+
+| 명령어 | 설명 | 비고 |
+| --- | --- | --- |
+| **`make up`** | 전체 컨테이너 백그라운드 실행 | 기본 시작 명령어 |
+| **`make down`** | 전체 컨테이너 중지 | 데이터(볼륨)는 유지 |
+| **`make rebuild`** | 전체 이미지 재빌드 후 시작 | 인프라 설정 변경 시 사용 |
+| **`make logs-backend`** | 백엔드(FastAPI) 로그 확인 | 실시간 오류 디버깅용 |
+| **`make restart-backend`** | 백엔드 컨테이너만 재시작 | 상태 이상 및 멈춤 해결용 |
+| **`make rebuild-backend`** | 백엔드 컨테이너 재빌드 | `requirements.txt` 패키지 추가 시 |
+| **`make scrape`** | 뉴스 스크래퍼 실행 | DB에 기사 적재 |
+| **`make embed`** | 미처리 기사 벡터 임베딩 | **최초 1회 실행 요망 (API 비용 발생)** |
+| **`make flush-db`** | RDB(PostgreSQL) 데이터 초기화 | 스크래핑 로직 수정 후 재수집 시 |
+| **`make flush-vector`** | 벡터DB(ChromaDB) 데이터 초기화 | 임베딩 모델/청크 사이즈 변경 시 |
+| **`make flush-all`** | RDB 및 벡터DB 데이터 모두 초기화 | 전체 데이터 파이프라인 재구축 시 |
+| **`make clean`** | 사용 중지된 컨테이너/네트워크 삭제 | 시스템 자원 확보 |
+| ~~**`make fclean`**~~ | ~~시스템 완전 초기화 (위험)~~ | ~~모든 컨테이너, 이미지, 로컬 데이터 삭제~~ |
+
