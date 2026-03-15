@@ -71,7 +71,7 @@ services:
     ports:
       - "${VECTOR_DB_PORT}:8000"
     volumes:
-      - ./volumes/_chroma:/chroma/chroma
+      - ./volumes/chroma:/chroma/chroma
     networks:
       - market_net
 

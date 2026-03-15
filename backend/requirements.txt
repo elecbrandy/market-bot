@@ -1,0 +1,22 @@
+# ./backend/requirements.txt
+
+# 1. Web Framework
+fastapi
+uvicorn[standard]
+
+# 2. Configuration & Validation
+pydantic
+pydantic-settings
+
+# 3. Database (PostgreSQL)
+sqlalchemy
+psycopg2-binary
+
+# 4. LangChain & LLM
+langchain
+langchain-core
+langchain-openai
+langchain-chroma
+
+# 5. Vector Database
+chromadb

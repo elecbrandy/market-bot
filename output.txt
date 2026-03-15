@@ -32,33 +32,38 @@ if __name__ == "__main__":
 ```
 ./Makefile
 
-.PHONY: up down build rebuild restart logs logs-backend logs-frontend logs-db logs-vectordb ps scrape clean fclean
+# .env 파일 로드
+ifneq (,$(wildcard ./.env))
+    include .env
+    export
+endif
 
-# 전체 서비스 시작 (scraper 제외)
+.PHONY: up down build rebuild restart logs logs-backend logs-frontend logs-db logs-vectordb ps up-db scrape test-scraper test-scraper-local embed sh-backend restart-backend rebuild-backend restart-frontend rebuild-frontend flush-db flush-vector flush-all clean fclean
+
+# 1. 서비스 기본 제어
 up:
 	docker compose up -d
 
-# 전체 서비스 중지
 down:
 	docker compose down
 
-# 전체 빌드
 build:
 	docker compose build
 
-# 빌드 후 시작
 rebuild:
 	docker compose down && docker compose build && docker compose up -d
 
-# 재시작
 restart:
 	docker compose restart
 
-# 로그 확인 (전체)
+ps:
+	docker compose ps
+
+
+# 2. 로그 확인
 logs:
 	docker compose logs -f
 
-# 개별 로그
 logs-backend:
 	docker compose logs -f backend
 
@@ -71,46 +76,68 @@ logs-db:
 logs-vectordb:
 	docker compose logs -f vector_db
 
-# 컨테이너 상태 확인
-ps:
-	docker compose ps
 
-# 스크래퍼 실행 (profiles: tools)
+# 3. 개발 및 테스트 (단일 컨테이너 제어)
+sh-backend:
+	docker compose exec backend /bin/bash
+
+restart-backend:
+	docker compose restart backend
+
+rebuild-backend:
+	docker compose up -d --build backend
+
+restart-frontend:
+	docker compose restart frontend
+
+rebuild-frontend:
+	docker compose up -d --build frontend
+
+
+# 4. 데이터 수집 및 임베딩 로직
+up-db:
+	docker compose up -d db
+
 scrape:
 	docker compose --profile tools run --rm scraper
 
-# 컨테이너만 삭제
+test-scraper:
+	docker compose up -d db
+	@sleep 3
+	docker compose --profile tools run --rm scraper
+
+test-scraper-local:
+	docker compose up -d db
+	@sleep 3
+	cd scraper && DB_CONTAINER=127.0.0.1 venv/bin/python3.11 main.py
+
+embed:
+	curl -X POST http://localhost:$(BACKEND_PORT)/embed/run
+
+
+# 5. 데이터 초기화
+flush-db:
+	@echo "PostgreSQL 데이터를 삭제하시겠습니까? [y/N] " && read ans && [ $${ans:-N} = y ]
+	rm -rf ./volumes/postgres/*
+	docker compose exec -T db psql -U $(POSTGRES_USER) -d $(POSTGRES_DB) < flush_db.sql
+
+flush-vector:
+	@echo "ChromaDB 데이터를 삭제하시겠습니까? [y/N] " && read ans && [ $${ans:-N} = y ]
+	docker compose stop vector_db
+	rm -rf ./volumes/chroma/*
+	docker compose start vector_db
+
+flush-all: flush-db flush-vector
+
+
+# 6. 시스템 정리 (Clean up)
 clean:
 	docker compose down --remove-orphans
 
-# 컨테이너 + 볼륨 + 이미지 + 빌드캐시 전부 삭제 (주의!)
 fclean:
 	docker compose down -v --remove-orphans
 	docker image prune -af
 	docker builder prune -af
-	rm -rf ./volumes/*
-
-# DB만 백그라운드로 단독 실행
-up-db:
-	docker compose up -d db
-
-# DB 실행 후 스크래퍼 원큐에 테스트하기
-test-scraper:
-	docker compose up -d db
-	@echo "DB가 준비될 때까지 3초 대기합니다..."
-	@sleep 3
-	docker compose --profile tools run --rm scraper
-
-# # DB 데이터만 전부 삭제 (테이블 구조는 유지)
-# flush-db:
-# 	docker compose exec -T db psql -U market_user -d market_db < flush_db.sql
-
-# DB만 띄운 상태에서 스크래퍼 로컬 실행
-test-scraper-local:
-	docker compose up -d db
-	@echo "DB가 준비될 때까지 3초 대기..."
-	@sleep 3
-	cd scraper && DB_CONTAINER=127.0.0.1 venv/bin/python3.11 main.py
 
 ```
 
@@ -128,7 +155,7 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 ```
 
 ```
@@ -138,8 +165,221 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 ```
 
 ```
-./backend/src/tmp.py
+./backend/src/core/config.py
 
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    PROJECT_NAME: str = "Market RAG API"
+    
+    # PostgreSQL 설정
+    POSTGRES_USER: str
+    POSTGRES_PASSWORD: str
+    POSTGRES_DB: str
+    POSTGRES_PORT: int = 5432
+    DB_CONTAINER: str = "db"
+
+    # OpenAI / ChromaDB
+    OPENAI_API_KEY: str
+    VECTOR_DB_CONTAINER: str = "vector_db"
+    VECTOR_DB_PORT: int = 8000
+
+    @property
+    def DATABASE_URL(self) -> str:
+        return f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.DB_CONTAINER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+settings = Settings()
+```
+
+```
+./backend/src/core/database.py
+
+import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from backend.src.core.model import Base
+
+DB_USER = os.getenv("POSTGRES_USER", "postgres")
+DB_PASSWORD = os.getenv("POSTGRES_PASSWORD", "postgres")
+DB_NAME = os.getenv("POSTGRES_DB", "market_db")
+DB_HOST = os.getenv("DB_CONTAINER", "db")
+DB_PORT = os.getenv("POSTGRES_PORT", "5432")
+
+DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+# pool_pre_ping=True: 연결을 사용하기 전에 DB가 살아있는지 체크 (끊김 방지)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+def init_db():
+    Base.metadata.create_all(bind=engine)
+
+def get_db():
+    """FastAPI Depends()에 주입할 DB 세션 제너레이터"""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close() # API 요청이 끝나면 반드시 세션을 반납
+```
+
+```
+./backend/src/core/__init__.py
+
+
+```
+
+```
+./backend/src/core/model.py
+
+from sqlalchemy import Column, Integer, String, Date, DateTime, Text, Boolean
+from sqlalchemy.orm import declarative_base  # 변경됨
+from sqlalchemy.sql import func              # 추가됨
+
+Base = declarative_base()
+
+class News(Base):
+    __tablename__ = 'news'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String, index=True)
+    keyword = Column(String, index=True)
+    title = Column(String)
+    content = Column(Text)
+    url = Column(String, unique=True, index=True)
+    is_embedded = Column(Boolean, default=False, index=True)
+    published_date = Column(Date, index=True)
+
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+```
+
+```
+./backend/src/api/request.py
+
+
+```
+
+```
+./backend/src/api/__init__.py
+
+
+```
+
+```
+./backend/src/api/response.py
+
+
+```
+
+```
+./backend/src/api/router.py
+
+
+```
+
+```
+./backend/src/service/embedding.py
+
+import chromadb
+from sqlalchemy.orm import Session
+from langchain_openai import OpenAIEmbeddings
+from langchain_chroma import Chroma
+from langchain.schema import Document
+from src.service.model import News  # SQLAlchemy 모델
+from src.core.config import settings
+
+# ChromaDB 클라이언트와 OpenAI 임베딩 모델 초기화
+chroma_client = chromadb.HttpClient(host="vector_db", port=settings.VECTOR_DB_PORT)
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=settings.OPENAI_API_KEY)
+
+vector_store = Chroma(
+    chroma_client=chroma_client,
+    collection_name="market_news_embeddings",
+
+)
+
+def run_embedding(db: Session) -> int:
+    """RDB에서 임베딩이 필요한 뉴스 데이터를 가져와서 ChromaDB에 저장"""
+    
+    # RDB에서 임베딩이 필요한 뉴스 데이터 조회
+    new_articles = db.query(News).filter(News.is_embedded == False).all()
+    if not new_articles:
+        return 0
+
+    documents = []
+    for article in new_articles:
+        # 뉴스 데이터를 Document 객체로 변환
+        doc = Document(
+            content=article.content,
+            metadata={
+                "id": str(article.id),
+                "source": article.source,
+                "keyword": article.keyword,
+                "title": article.title,
+                "url": article.url,
+                "published_date": str(article.published_date)
+            }
+        )
+        documents.append(doc)
+
+    # ChromaDB에 임베딩 저장
+    vector_store.add_documents(documents)
+
+    # RDB 상태 업데이트
+    for article in new_articles:
+        article.is_embedded = True
+    db.commit()
+
+    # 처리된 문서 수 반환
+    return len(documents)
+
+
+```
+
+```
+./backend/src/service/__init__.py
+
+
+```
+
+```
+./backend/src/service/rag.py
+
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from src.service.embedding import vector_store
+
+# llm 초기화
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
+
+def generate_answer(query: str) -> str:
+    """사용자 질문에 대한 답변 생성"""
+    
+    # ChromaDB에서 유사한 문서 검색
+    results = vector_store.similarity_search(query, k=5)
+    
+    if not results:
+        return "관련된 뉴스 기사를 찾을 수 없습니다."
+
+    # 검색된 문서에서 콘텐츠와 메타데이터 추출
+    context = "\n\n".join([f"Title: {doc.metadata['title']}\nContent: {doc.content}" for doc in results])
+
+    # 프롬프트 템플릿 생성
+    prompt_template = ChatPromptTemplate.from_messages([
+        ("system", "You are a helpful assistant that provides answers based on the following news articles:\n{context}"),
+        ("user", "{query}")
+    ])
+
+    # 프롬프트에 컨텍스트와 사용자 질문 삽입
+    prompt = prompt_template.format(context=context, query=query)
+
+    # LLM을 사용하여 답변 생성
+    answer = llm(prompt)
+
+    return answer
 
 ```
 
