@@ -1,7 +1,6 @@
 from sqlalchemy import Column, Integer, String, Date, DateTime, Text, Boolean
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.sql import func
-from datetime import datetime
+from sqlalchemy.orm import declarative_base  # 변경됨
+from sqlalchemy.sql import func              # 추가됨
 
 Base = declarative_base()
 
@@ -16,5 +15,6 @@ class News(Base):
     url = Column(String, unique=True, index=True)
     is_embedded = Column(Boolean, default=False, index=True)
     published_date = Column(Date, index=True)
+
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

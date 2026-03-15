@@ -67,9 +67,9 @@ test-scraper:
 	@sleep 3
 	docker compose --profile tools run --rm scraper
 
-# DB 데이터만 전부 삭제 (테이블 구조는 유지)
-flush-db:
-	docker compose exec -T db psql -U market_user -d market_db < flush_db.sql
+# # DB 데이터만 전부 삭제 (테이블 구조는 유지)
+# flush-db:
+# 	docker compose exec -T db psql -U market_user -d market_db < flush_db.sql
 
 # DB만 띄운 상태에서 스크래퍼 로컬 실행
 test-scraper-local:
@@ -77,3 +77,9 @@ test-scraper-local:
 	@echo "DB가 준비될 때까지 3초 대기..."
 	@sleep 3
 	cd scraper && DB_CONTAINER=127.0.0.1 venv/bin/python3.11 main.py
+
+sh-backend:
+	docker compose exec backend /bin/bash
+
+rebuild-backend:
+	docker compose up -d --build backend

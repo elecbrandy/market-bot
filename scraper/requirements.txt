@@ -1,0 +1,9 @@
+sqlalchemy
+beautifulsoup4>=4.12.0
+crawl4ai>=0.3.0    # 메인 크롤링 엔진
+lxml              # bs4의 빠른 파싱을 위한 파서
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+httpx>=0.26.0      # 비동기 HTTP 요청 처리
+psycopg2-binary>=2.9.0  # PostgreSQL 데이터베이스 드라이버
